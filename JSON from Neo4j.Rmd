@@ -1,0 +1,191 @@
+---
+title: "JSON From Neo4j"
+author: "Scott Akenhead scott@s4s.com 1-250-210-4410"
+date: '`r format(Sys.Date(),"%Y %B %d")`'
+output:
+  html_notebook: 
+    highlight: pygments
+    number_sections: yes
+    theme: journal
+    toc: yes
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+library(jsonlite, quietly=T);
+library(knitr, quietly=T);
+library(magrittr, quietly=T);
+library(googlesheets, quietly=T);
+library(openssl, quietly=T);
+library(visNetwork, quietly=T); 
+library(RNeo4j, quietly=T);  # note caps
+
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	comment = "",
+	results = "hold")
+options(digits=5, show.error.locations=T, stringsAsFactors=F);
+```
+## Local Functions
+An effort is made to co-locate the functions used in the subsequent R code. This facilitates a possible R package to assist others with similar work.
+
+```{r local, echo=T}
+cat("working directory:",getwd(),"\n");
+col=c("skyblue","peachpuff","chartreuse", "seagreen") # rip up your guy card
+# my functions start with a capital; camel case. 
+# Variables are python case unless they are a Resource in RoundTable.
+
+AddUID = function(a){
+# add or update ID column in a data.frame (column name is not UID)
+    last <- lastUID; # lastUID inherited from parent environment
+    n <-  dim(a)[1];  
+    a$ID <- seq.int(from=last+1,to=last+n, by=1)
+    lastUID <<- last+n;  # changes lastUID in parent environment
+    return(a);  # modified
+# examples 
+#   a <- AddUID(a)
+#   a %<>% AddUID # maggritr pipe 
+}
+
+#Macro=function(txt) eval(parse(text=txt)); # execute text
+#MakeUID=function(n=1){
+#    make1=function() paste0(sample(c(LETTERS),9,replace=T),collapse='');
+#    if (n == 1) return(make1());
+#   uid=character(n)
+#    for(j in 1:n) uid[j] <- make1()
+#    return(uid)
+#}
+```
+
+## Sequential ID
+A unique identity field (**ID**, not uid) is added to each node and link. This can be approached as as sequential uids from abitrary starts (which means the starts must be known). We increment, with every use, a variable called *lastUID*. This is applied to a dataframe *a* by local function *AddUID* as 
+> a %<>% AddUID 
+
+```{r lastUID}
+lastUID = 0  # the start. Please be careful with this.
+```
+
+## Codes for Resource Type
+As of 2018-04-21
+Edges are specified internally by three numeric codes (from, link, to) rather than by names. This is partly to enable localization.  
+### Resource codes
+>11210 person, 11211 organization, 11212 workgroup, 11213 event,11214 activity, 11215 place, 11216 document, 11217 webpage, 11218 citation, 11219 media, 11220 map, 11221 dataset, 11222 model, 11223 address, 11224 contactService, 11225 entry, 11226 item, 11227 request, 11228 message, 11229 conversation, 11230 learningObject, 11231 metadata, 11232 site,11233 other,31210 idea
+
+### Idea subTypes
+As of 2018-04-21  
+>67000 taxonomy,67001 life_history,67002 research,67003 management,67004 
+67005 geography, 67006 ecology,67007 biology,67008 other,67009 structure,67010 function,67011 IYS Theme
+
+### Link Codes
+Obsolete  
+missing hasSite.  
+missing hasTag (or IdeaTag), use 21245.  
+link between same resource types are isRelatedTo 21243.  
+Some links have implied direction: cites vs citedBy.
+missing has Doc, hasPerson (use hasContactPerson 21259)
+>hasActivity 21227, hasAddress 21219, hasCitation 21218, hasContactPerson 21259, hasContactService 21220, hasConversation 21236, hasDataset 21258, hasEntry 21237, hasEvent 21228, hasItem 21232,  hasMedia, 21229, hasMessage 21241, hasMetadata 21249, hasOrganization 21226,  hasPlace 21238, hasRequest 21242, hasResponse 21250, hasSeen 21235, hasUser 21252, hasWebpage 21217, hasWorkgroup 21221, inAddress 21268, isLinkedTo 21245, isRelatedTo 21243, isVisibleTo 21210, seenBy 21263, selected 21253
+
+### Link subTypes promoted to full types:
+> createdBy 21260, hasActivityParticipant 21267, hasActivityRole 21257,hasManager 21251, hasEventParticipant 21266, hasEventRole 21256,  hasOrganizationAffiliate 21265, hasOrganizationRole 21254, hasWorkgroupMember 21264, hasWorkgroupRole 21255 
+
+### Service type links
+>citedBy 21261, cites 21247, containedIn 21262, contains 21248, created 21231,
+
+```{r RTcodes}
+RLcode<-read.csv("../data/RLcodeRT.csv");
+cat("RLcode has",dim(RLcode)[1], "rows\n"); colnames(RLcode)
+```
+
+## Person
+From roundtable_data.js:
+>var persons_text = '{"persons": ['+ '{"ID": 6067182960,"label": "Chuck Parken","namestring":"Chuck Parken", "firstnamesorinitials":"Chuck", "familyname":"Parken", "description":"", "status":"active", "startdate":"2017 January 24", "enddate":"2017 January 26"},'+
+
+From email 2018-04-21
+Updated  familyname to familyName
+>ID_no = person_json[i].ID;  # this is unique instance id
+"ID": ID_no
+"resourceNodeTypeID": 11210  
+"resourceNodeSubTypeID": ''
+"label": ""
+"namestring": ""
+"prefix": ""
+"firstNamesOrInitials":""
+"middleNamesOrInitials":""
+"familyName": ""
+"familySuffix": ""
+"honorificSuffix": ""
+"description": ""
+"status": "active"
+"start_date": "",
+"end_date": "",
+
+### Cypher equivalent
+>Create (p:Person{ID:65432, resourceNodeTypeID:11210,
+resourceNodeSubTypeID:'', label:'',
+namestring:'', 
+prefix:'', firstNamesOrInitials:'', middleNamesOrInitials:'', 
+familyName:'',familySuffix:'', honorificSuffix:'',
+description:'',
+status:'active',start_date:'',end_date:''}) 
+
+```{r p}
+file="../data/Person.json"
+p=Person[sample(dim(Person)[1],10),] # sample 10 rows from Person
+b <- data.frame(ID = NA,resourceID=11210,
+  label = Person$Person.name[1:10],
+  namestring = Person$Person.name[1:10],
+  firstNamesOrInitials = Person$Person.firstName[1:10], 
+  familyname = Person$Person.lastName[1:10], 
+        familySuffix ="", honorificSuffix="",
+  description = "",
+  status = "active", startdate = "2018-01-01", enddate = "");
+b %<>% AddUID; cat("lastUID =",lastUID,"\n");
+print(b)
+# b %>% toJSON(pretty=TRUE) %>% cat(file=file);
+```
+
+```{r openDB}
+graph = startGraph("http://localhost:7474/db/data/")
+
+```
+This next chunk deletes the previous version of your database (but not neo4j app).
+If there is a previous db, you will need to respond "Y" in the Rstudio console to permit this. 
+
+```{r clearDB, message=TRUE}
+clear(graph) # else old graph persists. answer with capital Y
+```
+
+# Load the Knowledge Graph
+## Constraints
+Preventing duplication of nodes is enforce by *addConstraint* where the key is some field in the node that will be unique, such as an email. Note that two people can have the same name (but not email), so we **will** need to add a unique identifier to Person to ensure uniqueness and enable constraint (e.g. email for a specific person).  I used rneo4j::addConstraint, a function that is the equivalent of the Cypher query:
+>CREATE CONSTRAINT ON (p:Person)
+       ASSERT p.name IS UNIQUE
+
+```{r constrain,message=TRUE}
+# prevent duplication of nodes
+addConstraint(graph, label="Person",         key="name")
+#addConstraint(graph, label="Place",          key="name")
+#addConstraint(graph, label="Activity",       key="nameShort")
+#addConstraint(graph, label="Organization",   key="nameShort")
+#addConstraint(graph, label="ContactService", key="email")
+getConstraint(graph) # all
+```
+Make five of (:Person) in neo4j
+
+```{r Person}
+for(j in 1:5){
+    p <- createNode(graph,"Person", 
+        name=Person[j,"Person.name"], 
+        firstNamesOrInitials=Person[j,"Person.firstName"],
+        familyname=Person[j,"Person.lastName"],
+        familySuffix ="", 
+        honorificSuffix="",
+        description = "",
+        status = "active", 
+        startdate = "2018-01-01", 
+        enddate = "")
+}
+p;
+```
+

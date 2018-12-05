@@ -1,0 +1,886 @@
+---
+title: "DFO Salmon Net Second Survey"
+author: "Scott Akenhead"
+date: "`r format(Sys.Date(),'%Y %B %d')`"
+output:
+  html_document: 
+    fig_caption: yes
+    highlight: pygments
+    keep_md: yes
+    theme: journal
+    toc: yes
+    toc_depth: 2
+  html_notebook:
+    df_print: paged
+    fig_caption: yes
+    highlight: pygments
+    theme: journal
+    toc: yes
+    toc_depth: 2
+---
+    
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,results="hold",comment="");# , dpi=72)
+options(digits=5,show.error.locations=T,stringsAsFactors=F,show.signif.stars=F)
+library(ggplot2); library(magrittr);library(googlesheets);library(openssl);
+library(knitr);
+```
+
+```{r localFunctions, include=FALSE}
+
+dirIn="/Users/Scott/Documents/Projects/DFO - OK/Data/from FPC/"     # read from
+dirOut="/Users/Scott/Documents/Projects/DFO_Salmon_Net/Data_from_R/"   # write to
+
+source('~/Documents/R_main/rScott/R/Simple.R')
+source('~/Documents/R_main/rScott/R/Terse.R')
+source('~/Documents/R_main/rScott/R/Terse_matrix.R')
+source('~/Documents/R_main/rScott/R/Terse_data_frame.R')
+source('~/Documents/R_main/rScott/R/WordTable.R')
+
+SetPar=function() par(   # a function with one statement
+    oma = c(2,2,1,1),    # room for marginal titles
+    mar = c(3,3,1,0),    # spacing between plots
+    mgp = c(1.5,0.5,0),  # axis numbers close to axis
+    tcl = 0.2,           # ticks inside
+    xaxs = "i",          # 0 at origin. begs xlim=c(0,1.1*max(x))
+    yaxs = "i",          # 0 at origin. begs ylim=c(0,1.1*max(y))
+    pch=20               # small points
+); 
+
+axis34=function(){axis(3,label=F);axis(4,label=F);} # just ticks, top and right
+
+R2=function(a){          # when line through origin, lm gives wrong r^2
+    y=a$model$y;ym=mean(y);
+    r2=1-sum(a$residuals^2)/sum((y-ym)^2);
+    round(100*r2,2) # as percent to two decimals (1/10,000)
+}
+
+macro=function(tx) eval(parse(text=tx))
+
+Margins=function(a,fnc=sum,...){    # adds right-hand col and bottom row
+    a=cbind(a,apply(a,1,fnc,...));  # as in apply(a,1,mean, na.rm=T)
+    a=rbind(a,apply(a,2,fnc,...)); return(a);
+}
+
+TwoStep = function(y,y1,xlab,ylab){
+    # y is a numeric vector with (short) names. y1 has same length and lower max value.
+    FilledStep <- function(y,colr=NULL){
+        x=1:(length(y)+1) # categorical x-axis, one longer than categories
+        xp=rep(x,each=2);
+        yp=c(0,rep(y,each=2),0);
+        #rgb(t(col2rgb("skyblue")),alpha=125,maxColorValue=255)# "#87CEEB7D"
+        #rgb(t(col2rgb("tan1"   )),alpha=125,maxColorValue=255)# "#FFA54F7D"
+        if(is.null(colr)) colr= "#87CEEB7D" # skyblue, half density.
+        polygon(x=xp,y=yp, col=colr)
+    }
+    n=length(y); if (n != length(y1)) stop("TwoStep: inputs differ in length")
+    SetPar()
+    plot(1,1,type="n", xaxs="r",xlim=c(1,n+1), ylim=c(0,1.05*max(y)), xaxt="n", 
+         xlab=xlab, ylab=ylab); # empty plot
+    axis(1,at = 0.5+c(1:n), labels=attributes(y)$dimnames[[1]]) # tics centered
+    box(); axis(4,labels=F) # tics on right side
+    FilledStep(y) # default colour
+    FilledStep(y1,colr="#FFA54F7D")
+    # example TwoStep(c(2,4,2),c(1,3,1),xlab="Bottom, ylab="Left Side")
+}  
+
+ChoiceTabSum = function (a,vals=c(1:5) ){ 
+    # counts of known values in the vector "a".
+    # zero is a possible count, so this differs from table().
+    # use: apply(matrix, 2, ChoiceTabSum) to count choices in a row
+    n <- length(vals);
+    b <- integer(n) # zeros
+    for(k in 1:n) b[k] <-  sum(a == vals[k]) # count each value
+    #  == is dangerous for reals
+    return(b)
+}
+
+ChoiceTabMean = function (a,vals=c(1:5) ){ 
+    # counts of known values in the vector "a". NA verboten.
+    # zeros are possible if some choices never chosen.
+    # NOTE: vals must cover all choices, else denominator for mean is wrong.
+    b=apply(a,MARGIN=2,FUN=ChoiceTabSum,vals)/dim(a)[1]
+    return(b)
+}
+
+IYSplot = function(a,xtxt=1:5,xlab="IYS Choice", ytxt=topic,ylab="IYS Topic"){ 
+    # Looks for SetPar() in calling environment
+    SetPar(); par(mai=c(0.5,0.5,0.25,3.0), omi=c(.25,0,.25,0)) # extra space
+    nr=nrow(a);nc=ncol(a)
+    plot(1,1, type="n", xlim=c(0,1+nc), ylim=c(0,1+nr),
+      yaxt="n", xaxt="n", xlab=xlab, ylab=ylab)
+    sw = min(1.0, 2.8/max(strwidth(ytxt))); # shrink axis text to fit?
+    # cat("sw=",sw,"\n")
+    axis(4,at=1:nr,labels=rev(ytxt),cex.axis=sw,las=1) # Y axis
+    las=3; if(is.numeric(xtxt)) las =1 # vertical text, horizontal numeric
+    axis(1,at=1:nc,labels=xtxt, las=las);  # X axis
+    axis(2,labels=F);axis(3,labels=F); # left and top, tics only.
+    # matrix (i,j) is image(j,i) but image (1,1) is top left.
+    # image handled as if matrix was rotated 90 degrees.
+    # x=matrix(1:12,ncol=3;x;t(x[,ncol(x):1])
+    z=t(a[,nc:1])
+    image(x= 1:nc, y=1:nr,z=z, xlim=c(0,1+nc), ylim=c(0,1+nr), col=cm.colors(8), add=T)
+    # example
+    # x=matrix(1:18, ncol=3); x; 
+    # IYSplot(x, xtxt=c("c1","c2","c3"),ytxt=c("r1","r2","r3","r4","r5","r6"))
+# test:
+#  x<- matrix(1:(37*5), ncol=5);x;  # 37 by 5
+# z <- t(x[,ncol(x):1]); # rotate 90 degrees counterclockwise
+# SetPar();
+# image(x=1:ncol(x), y=1:nrow(x), z=z, xlim=c(0,1+ncol(x)), ylim=c(0,1+nrow(x)), col=gray((0:16)/16) )
+}
+
+Scale <- function(x){m <- range(x); (x-m[1])/(m[2]-m[1])};  # 0 to 1, linear
+ScaleTo10 <- function(x){round(10*Scale(x),0)};  # 0 to 10, linear, integers
+ScaleNeg1Pos1 <- function(x){2*(Scale(x)-0.5)};  # -1 to +1, linear
+
+# subName = function(a){  # not used. see merge()
+#     countTopics= cumsum(c(0,12,8,10,7)) # rows to offset in each theme
+#     topic=substr(a,6,6);
+#     if(topic=="99") return(NULL); # "other" 
+#     theme=substr(a,4,4);
+#     row=countTopics[as.numeric(theme)] + as.numeric(topic);
+#     return(row)
+# }
+
+HMjob=function(y1,code=NULL,mainText="",fac="jobCode",printWho=TRUE){
+    # each row in y1 is 37 IYS topic choices then name, region, jobCode: 40 cols
+    # looks for factr (relates topic to theme), theme (names), topic (names)
+    choiceLabel=c("no","pending", "need", "offer", "critical"); 
+    x = matrix(NA,nrow=5,ncol=6) # for choices by themes
+    if(is.null(code)) {y <- y1} else {y <- y1[y1[,fac] == code,]} # pick rows
+    if(printWho) print(y[,38:40])  # who, job, region.
+    z <- apply(y[,1:37],2,ChoiceTabSum)  # count choices including zeros  
+    colnames(z) = topic; 
+    z %<>% t %T>% print # kable # %T>% Terse; # print as 37 by 5
+    for (j in 1:5) x[j,] <- tapply(z[,j],fctr,mean); # by col in 37 by 5
+    dimnames(x) <- list(Choice = choiceLabel,Theme=theme);
+    x %<>% t %>% round(1) %>% print # kable # %T>% Terse # row theme, col choice
+    par(omi=c(.25,0,.25,0)) # extra space below and above the plot
+    z %>%  heatmap(Colv=NA, col=cm.colors(8), margins=c(3,10),
+        labCol=choiceLabel, cexCol=0.75, cexRow=0.66, main=mainText);
+    z[,2:5] %>%  heatmap(Colv=NA, col=cm.colors(8), margins=c(3,10),
+        labCol=choiceLabel[-1], cexCol=0.75,  cexRow=0.66, main=mainText);
+    x[6:1,5:2] %>% IYSplot(xlab="",xtxt=choiceLabel[2:5],ytxt=theme);
+    mtext(mainText)
+}
+
+```
+
+# Introduction  
+(to be written)
+## DFO Salmon Network reflects the International Year of the Salmon
+(to be written)  
+## Surveys for the DFO Salmon Network  
+The survey was named **DFO Salmon Net: People and Projects** with 351 selected recipients from within DFO. Recipients were contacted by email 2017 September and October. A PDF of the survey questions is posted 
+[HERE](https://docs.google.com/a/s4s.com/viewer?a=v&pid=sites&srcid=czRzLmNvbXxzb2NrZXllLWN1bXVsYXRpdmUtaW1wYWN0c3xneDplOWEwMDNhOWFlZGI5MDI).
+A .csv file with 163 responses was downloaded from Survey Monkey after the survey was closed 2017 October 29. Many responses were incomplete.
+
+# Survey Data
+## Raw Data and Ancillary Data
+The raw survey data is
+[HERE](https://docs.google.com/spreadsheets/d/1hsHxKjWFYudXglnEvkugYWK1pfWmldsYZHYQPIvNqbg/edit#gid=770833216). Hand edits were required to reorganize information into the appropriate fields, create comma separated lists for complicated results (e.g. lists of URLs, items with commas in quotes, fix spelling, expand abbreviations, standardize capital letters (fewer), and remove spurious text. The resulting sheet is 
+[HERE.](https://docs.google.com/spreadsheets/d/18vq--sjZigHRtyb6gxf0nlhx0YH2NeIiwvDO0LvydHQ/edit#gid=770833216)
+
+The survey results are in *condensed* format and replaces the text for multiple choice answers with numeric codes referring to the user’s choice, with the translations in yet more Google Sheets: 
+[Codes](https://docs.google.com/spreadsheets/d/1xABpZjt6bgycphtnbMJzMGGGhfcVKk_yn_Kh_iWCcfU/edit#gid=1340486754), 
+[Place Address](https://docs.google.com/spreadsheets/d/1SYDSw4f6EMEZZQ8nKA1k-1AHuixpD54aVQhgPjaogoU/edit#gid=1616508107) and 
+[IYS Themes and Topics](https://docs.google.com/spreadsheets/d/1xABpZjt6bgycphtnbMJzMGGGhfcVKk_yn_Kh_iWCcfU/edit#gid=1340486754).
+Supplementary data, not obtained from the survey, includes 
+[Person Details](https://docs.google.com/spreadsheets/d/1gFSnstwFOZ7wDCyai-fZVGQVpes3aCP4SH0OXqPWATc/edit#gid=55415285). 
+
+All the data is held in Google Sheets to support collaboration and prevent loss. Sheets have roll-back, so all preceding versions (automated) can be recovered. 
+
+## Read IYS topics and choices from Google Sheets  
+```{r gs, message=F,echo=F, cache=T}
+ss2=gs_key("1xABpZjt6bgycphtnbMJzMGGGhfcVKk_yn_Kh_iWCcfU")  
+IYSCodeIdea = gs_read(ss2)        %>% as.data.frame();  # IYS survey row
+IYSCodeChoice = gs_read(ss2,ws=2) %>% as.data.frame();  # IYS survey column
+kable(IYSCodeChoice,caption="Survey choices for the IYS topics")
+```
+
+## Read "Edited Survey 2017 October 29"
+```{r survey_in, message=F,echo=F, cache=T}
+# https://docs.google.com/spreadsheets/d/18vq--sjZigHRtyb6gxf0nlhx0YH2NeIiwvDO0LvydHQ/edit#gid=770833216
+ss3=gs_key("18vq--sjZigHRtyb6gxf0nlhx0YH2NeIiwvDO0LvydHQ");
+survey = gs_read(ss3,colnames=TRUE) %>% as.data.frame();
+j=sort(sample(1:163,5))
+kable(survey[j,c(1:9,52,60,67)], caption="Edited Survey 2017 October 29" ); # 163 by 75
+```
+
+## Read Person with Region and Job Code
+This ancillary table has more names than the survey recipients.
+```{r PRJ,message=F,echo=F,cache=T}
+#https://docs.google.com/spreadsheets/d/1jdmK30Z7vcxVfXJ8I2u4eZ50cbBJnLTPnog4ClF01hE/edit#gid=1417584488
+ss4=gs_key("1jdmK30Z7vcxVfXJ8I2u4eZ50cbBJnLTPnog4ClF01hE"); 
+person= gs_read(ss4, colnames=TRUE) %>% as.data.frame(); 
+j=sort(sample(1:dim(person)[1],10))
+kable(person[j,c(1,2,4,7,8)],caption = "Person with Region and Job Type"); # sample
+jobCode= gs_read(ss4,ws=2, colnames=TRUE) %>% as.data.frame();
+kable(jobCode);
+```
+## Read Recipients
+Obtained from Survey Monkey, people who actually received the survey and two reminders.
+```{r recip,message=F,echo=F,cache=T}
+ss5  = gs_key("1gFSnstwFOZ7wDCyai-fZVGQVpes3aCP4SH0OXqPWATc")
+# person = gs_read(ss5,colnames=TRUE) %>% as.data.frame(); 
+# print(person[seq(1,350,35), ]);    
+recipient = gs_read(ss5,colnames=TRUE, ws=2) %>% as.data.frame(); 
+j=sort(sample(1:dim(recipient)[1],10))
+kable(recipient[j,],caption="Recipiets SalmonNet 2017 September26");
+#print("People SalmonNet 2017 September26  --- branchSector");
+#branchSector = gs_read(ss5,colnames=TRUE, ws=3) %>% as.data.frame() %T>% print;
+```
+
+## Extract Names for IYS Theme and Topic  
+Lists of theme and topic names, and a variable *fctr* that relates the 37 topics to the 6 themes.
+```{r extract}
+j <- IYSCodeIdea$IYS_Row == 0  # theme
+print("Theme, Short")
+theme=IYSCodeIdea[j,"IYS_Short_Text"] %T>% print;
+j <- j | IYSCodeIdea$IYS_Row == 99 # theme or "other"
+print("Topic, Short")
+topic <- IYSCodeIdea[!j,"IYS_Short_Text"]  %T>% print; # not theme, not "other"
+print("\nRelate 37 Topics to 6 Themes")
+fctr <- IYSCodeIdea[!j,"IYS_Theme"] %T>% print 
+```
+
+## Merge Person Details with Recipients  
+A list of survey recipients was recovered from Survey Monkey, provided name, email, and response (complete,partial,no) for 351 recipients and 163 responses.  A separate list of 368 DFO salmon staff was compiled with name, email, region, and job type (7 categories). These lists were merged. Misspelt names were discovered and corrected in the longer staff list.  
+
+```{r mrg_recip_person}
+# person is 367 by 9. emails are all in caps, unlike recipient
+# recipient is 351 by 3.
+person1 = merge(x=person[,c(1,2,4)], y=recipient, by="name",all.y=TRUE); # 351
+person1$email.x <- NULL; # remove a column
+x=person1[ (is.na(person1$region) | is.na(person1$jobCode)), ]; 
+if(nrow(x) != 0) {print(x[1:max(nrow(x),10)])} else print("No job or region missing") # check!
+```
+
+## Region and Job as Factors for Survey  
+The survey data with 163 names was merged with ancilliary data for 351 names, using email address as the unique identifier in both tables. Variables *name,region,* and *jobCode* are merged into survey.  
+
+Capital letters in emails vary between lists: *person* has names as proper nouns but not all emails in *survey* have names with capital letters. This was solved by merging *person* with *recipient* so *person1* had the same capitals for email as *survey*.  
+```{r add_job_reg}
+# survey=survey[order(survey$email),]    # sort, vary caps in email have no effect
+# person1=person1[order(person1$email),] # 351 rows sort ditto
+survey1=merge(survey,person1[,c(1:4)],by="email",all.x=T ) # 163 rows
+# not all emails in survey are capitalized.
+# write.csv(file="test.csv",survey1[,c(1:3,76:78)]) # checked!
+```
+# Analysis
+## Determine Thorough Answers re IYS Topics
+First determine columns for choices re IYS theme and topic, then count missing answers for IYS topics for each response. That results is used for the frequency of responses by job type and region.
+x0 is a matrix, 163 by 37.  
+x1 is 124 by 37 after deleting not-useful responses, *nar*.
+y0 is a data.frame,163 by 40 after adding columns name, region, jobType.
+
+```{r useful}
+k = colnames(survey1) %>% substr(1,3) %>% equals("IYS"); # cols 10 to 52, so 43
+k1= colnames(survey1) %>% substr(5,7) %>% equals(".99"); # 6 of IYS "other"
+k=k & !k1;                        # leaves 37 columns
+x0 = survey1[ ,k] %>% as.matrix;  # 163 row, 37 col
+y0 <- cbind(x0, survey1[76:78]) # add name,region,job to IYS choices
+nar = apply(x0,1, function(x) sum(is.na(x)) ) # count missing by person (row)
+jans <-  nar > (37-25) # rows with < 25 answers to 37 topics, junk answers
+thorough = rep("Thorough",163);
+thorough[jans] <- "Partial";  # 39, leaves 124
+x1 <- x0[!jans,] # useful choices
+y1 <- y0[!jans,] # with factors
+nac <- x1 %>% apply(2, function(x) sum(is.na(x)) ) # count missing by topic  
+names(nac)= colnames(x0)
+nac
+```
+
+## Compare Responders to Recipients by Job Type  
+The survey was sent to 351 people, of which 163 responded and 124 provided useful choices about collaboration on topics within IYS themes. The job types for recipients were counted and compared to responders, and similarly for DFO regions.
+The 351 responses also had to have a count by person (row) of missing choices re IYS topics to determine "not thorough" responses.
+
+```{r jobFreq}
+rrp=c("Recipients","Responders","Thorough","Percent")
+responded <- person1$responded
+responded[responded == "Opted out"] <- "No"
+responded[ person1$responded== "Partial" | person1$responded == "Complete"] <- "Yes";
+# nar is 163 long from survey responses not 351 from recipients.
+jj <- 0;
+for(j in 1:length(responded)){  # 351
+    if(responded[j] == "Yes") {
+        jj=jj+1;
+        responded[j] <- thorough[jj] # 163 things in 351 places 
+    }
+}
+jobFreq  <- table(person1$jobCode, responded) %>% addmargins
+a <- as.matrix(jobFreq)
+PercentThorough <- round( 100*a[,3]/a[,4], 0) 
+bj=cbind(a,PercentThorough)
+kable(bj,caption="Table x. Survey Response by Job Type across all Regions")
+```
+
+
+## Compare Responders to Recipients by Region
+```{r  RegFreq}
+region = person1$region
+region[region == "Newfoundland"] <- "NL";
+region[region == "Central and Arctic"] <- "Central";
+region[region == "HQ"] <- "NCR";
+regFreq  = table(region,responded) %>% addmargins
+a <- as.matrix(regFreq)
+PercentThorough <- round( 100*a[,3]/a[,4], 0) 
+br=cbind(a,PercentThorough)
+kable(br,caption="Table x. Survey Response by Region across all Job Types")
+```
+
+###Summarize as plots.  
+
+```{r plt_resp_job,fig.cap="Survey recipients and responders compared by job type.  MA: Manager (primarily manage staff), EG: Technicians and Engineers (not in hatcheries), RM: Resource Manager (fisheries and habitat management by biologists, technicians, and managers), PO: Policy analysts and economists, BI: Biologist (Science Branch), RE: Research Scientist, HA: Enhancement Staff (biologists, community advisors, hatcheries staff)."}
+SetPar(); par(xaxs="r",mgp = c(2,0.5,0))
+colr=c("grey","cyan","magenta")
+txt=c("Thorough","Partial","No")
+barplot(t(jobFreq[1:7,1:3]), col=colr, beside=F, las=1, ylim=c(0,100), 
+        xlab="Job Type", ylab="Count"); 
+    box();axis(4,labels=F)
+legend("top",legend=txt, fill=rev(colr), bty="n")
+```
+
+
+```{r plt_resp_reg, fig.cap="Survey recipients and responders compared by DFO Region. Central: Central and Arctic, NCR: National Capital Region, NFLD: Newfoundland and Labrador, "}
+SetPar(); par(xaxs="r",mgp = c(2,0.5,0))
+barplot(t(regFreq[1:7,1:3]), col=colr, beside=F, las=2, ylim=c(0,275),
+    xlab="", ylab="Count"); 
+    box();axis(4,labels=F)
+legend("top",legend=txt, fill=rev(colr), bty="n")
+
+```
+
+## Survey Code Substitution  
+Survey choices about IYS topics can be expanded to short names and long names for displays. Similarly, codes for job, region, and location (building) can be expanded. A function to determine the correct row of names in IYSCodeIdea is required. The actual choice, 1 to 5, is the row in IYSCodeChoice. If all IYS choices were missing, that response was deleted. If some choices were missing, lack of interest was assumed (assigned choice = 1). 
+
+```{r cs}
+
+# count missing in each column
+nar = x0 %>% apply(1, function(x) sum(is.na(x)) )
+  # count missing in each row
+jans = nar > (37-25) # rows with < 25 answers to 37 topics, junk answers
+```
+
+## Examination of pattern of skips.  
+For IYS topics, `r sum(nar == 37)` survey responders did not address any IYS topics" and `r sum(jans)` addressed fewer than 25 topics. Those responders were deleted before the analysis of collaboration potential.
+
+
+**Table x.** Frequency of skipped choices by IYS topic.  
+
+```{r skips_theme}
+a=tapply(nac,theme[fctr],sum)  # sum missing by theme for the 37 topics
+b0 <- table(fctr)
+b1=(a / b0) %>% round(.,1) # skips per topic by theme
+b2=cbind(a,b0,b1) 
+colnames(b2) <- c("Skips","Topics","Skips/Topics")
+kable(b2, caption ="Table x. Frequency of skipped choices by IYS topic.")
+```
+
+## Interpretation of Effect of Skips  
+Responders who made choices for 25 or more, but not all, of the IYS topics did not tend to quit before the last themes. The opposite is true, there were more skips in the first theme than in subsequent themes. The skips were spread evenly across the topics within theme 1 and theme 3 (34 of the 49 skips). From 124 useful resposes to 37 topic, there are 4,588 choices, of which 49 skips is 1%. We concluded that the pattern of skips would not introduce an important bias if we were wrong about interpreting a skip to mean that a topic was *No, or not applicable* to a responder's interest in potential collaborations, i.e., that a skip is the same as choice = 1. In this situation, not making a choice was a meaningful choice.
+
+
+## Barplot of skips from useful but incomplete choices about IYS topics.  
+
+```{r hist_skip1, fig.cap="Count of skips for IYS Topics where skips occurred, within the 124 survey responses considered useful."}
+x=nac[j <- nac > 0] # skips in topics where there were skips
+SetPar();par(xaxs="r",oma = c(3,2,1,1));
+barplot(x, names.arg=topic[j],las=2,ylim=c(0,5),ylab="Count",xlab="",cex.names = 0.33)
+box();
+```
+
+```{r hist_skip2, fig.cap="Count of skips for IYS Topics where skips occurred, including topics with zero skips, within the 124 survey responses considered useful."}
+x=nac #
+SetPar();par(xaxs="r",oma = c(3,2,1,1));
+barplot(x, names.arg=topic,las=2,ylim=c(0,5),ylab="Count",xlab="",cex.names = 0.33)
+box();
+```
+
+```{r hist_skip3, fig.cap="Totals for choice in topics, within the 124 survey responses considered useful."}
+x=nac # total choice in topics including topics with zero skips
+SetPar();par(xaxs="r",oma = c(3,2,1,1));
+barplot(124-x, names.arg=topic,las=2,ylim=c(0,124),
+        ylab="Count",xlab="",cex.names = 0.33); box();
+```
+
+## Summary of Choices for IYS Topics.  
+A table with the count of choices for each topic is created (37 rows, 5 columns) by a local function *ChoiceTabSum*.  
+```{r choiceTab}
+x1[is.na(x1)] <- 1;  # skipped -> Choice 1, "not applicable" 
+y1[is.na(y1)] <- 1;
+x2 = x1 %>% apply(2,ChoiceTabSum); # by column. 5 by 37 
+colnames(x2) <- topic
+x2 <- t(x2); # a matrix, 37 by 5
+choice=c("1.  No","2. Pending","3. Activities","4. Knowledge","5. Vital"); 
+kable(x2, col.names=choice, caption="Counts of choices regarding collaboration by IYS topic, from 124 thorough responses."); 
+Terse(x2) # to convert text to table in Word.
+```
+## Pattern of Choices  
+Without rearranging the IYS topics, the pattern of collaboration choices (1 to 5) is presented. Darker magenta are the most frequent choices, darker cyan are the least frequent.  
+
+```{r iysplot_topic,fig.cap="Collaboration Choices by IYS Topic, fig.height=6"}
+z=x2[37:1,5:1]  # I have not idea why this flip is required.
+IYSplot(z) # uses default text and titles.
+```
+
+```{r test_matrix2image, eval=FALSE,include=FALSE}
+SetPar();
+x = matrix(1:(37*5), ncol=5);x; 
+z <- t(x[,ncol(x):1]); # rotate 90 degrees counterclockwise
+image(x=1:ncol(x), y=1:nrow(x), z=z, xlim=c(0,1+ncol(x)), ylim=c(0,1+nrow(x)), col=gray((0:32)/32) )
+IYSplot(x, xtxt=paste0("c",1:5),ytxt=paste0("r",1:37))
+```
+
+## Summary by IYS Theme  
+From all 37 choices (rows), the count for each of the five choices (columns) were summarized within each of the 6 IYS themes. Because there were varying number of topics (rows) within themes, the average was appropriate rather than the sum. The resulting table with 6 rows is also presented as an image via custom function *IYSplot*.  
+
+```{r smry.theme, fig.cap="Figure x. Collaboration choices by IYS theme from all useful survey responses."}
+# x2 is the 37 by 5 matrix and fctr relates topic to theme 
+xtheme=matrix(nrow=6,ncol=5);  # 6 themes by 5 choices
+for(j in 1:5) xtheme[,j] = tapply(x2[,j],fctr,mean) # by column
+row.names(xtheme) = theme
+kable(round(xtheme,0), col.names=1:5, caption="Table x. Collaboration choices by IYS theme from all useful survey responses.")
+#print("Choices by Theme, scaled as -1 to +1")
+#(((xtheme - min(xtheme)) / (max(xtheme)-min(xtheme) ) -.5)*2) %>% round(1) # -1 to 1.
+z=xtheme[6:1,5:1] # again with the freakin' flip. WHT?!
+IYSplot(z,ytxt=theme,ylab="IYS Theme")
+# heatmap(t(xt0), Rowv=NA,Colv=NA)
+#cm= xt0 %>% rowMeans; cm; # 5
+#xta = xt0 %>% apply(2, function(x) x-cm); xta %>% round(0) %>% print;
+```
+
+## Interpretation  
+Whilst pondering survey reponses about IYS topics and themes, please note choices within a topic were exclusive. This excluded the ability for a survey responder to plead for help to obtain collaboration for their activities: Choice 2 *Yes, but unlikely at present* precluded choice 5 *This collaboration is vital to my work and should be a priority for DFO*. As a result, people who answered the survey humbly mentioned that they were unable to pursue interesting opportunities for collaboration, presumably due to resource constraints (workload, staff, budget), instead of stridently asserting that DFO needs to help them with the collaborations necessary to modernize their activities. Perhaps polite Canadians, perhaps a flaw in the survey design. This exclusion effect applies to IYS Theme 2 *Effects of Changing Habitats* and to IYS Theme 6 *Outreach and Communication* (see strong magenta for choice 2 matched with cyan for choice 5 for themes 2 and 6). It's the faint calls for help that need attention.  
+
+With the caveat that topics from different themes were associated with specific collaboration opportunities for survey responders, and that topics within themes might not all be associated that way, this summary of topics by themes is offered:  
+* Theme 1 (current status of salmon) was *voted* to be not applicable for collaboration.  
+* Theme 2 (effects of changing habitats) was strongly *interested but cannot pursue*  
+* Theme 3 (new tech and methods) was moderately *not applicable* and *cannot pursue*.  
+* Theme 4 (connecting salmon to people) was clearly *interested but cannot pursue*.  
+* Theme 5 (information systems) was a bit more positive, many people were interested and many had projects that needed collaboration re information management and knowledge mobilization.  
+* Theme 6 (outreach and education), was similar to Theme 2, clearly but less emphatically *interested but cannot pursue.*  
+
+After subtracting the column means, the overall tendency for choices 1 through 5, the  preceding summary for Theme 2 was reinforced. This treatment emphasized that Theme 5 (information systems) was something DFO staff wanted for their existing activities. 
+
+It is worth noting that the conclusions from votes about collaboration on 37 topics are also the conclusions from summarizing those votes into 6 themes. Restating that conclusion in this context, and guessing at the story behind the numbers: *The fact that salmon are facing a changing world (climate change in the Salmosphere) is important to DFO staff, but they need help with data management before they can react.*
+This preliminary and arguable conclusion will be addressed in subsequent analyses of the survey.
+
+Humans also face a rapidly changing world. We need to understand that in order to react wisely, hence the interest in salmon as *the canary in the coal mine* but on a global scale. If the canaries die (from carbon monixide), then get out of the coal mine, fast. If the salmon die (from global warming), then ... ah, nowhere to run. 
+
+## Scores by Region and Job Classification  
+A breakdown by region and then job of responses (Complete, useful, not useful) is followed by a similar breakdown after scoring responses. The weights for scoring are: choice 1 (not applicable): 0, choice 2 (deferred): 1, choice 3 (offer activity): 2, choice 4 (offer knowledge): 3, choice 5 (critical, a DFO priority): 4. The intention is to identify the importance of an IYS topic across all the choices.  
+
+## Score by Importance  
+The choices for IYS topics are approximately ordinal, from choice 1 which indicates minimal importance to choice 5 which indicates maximal importance. Here the choices by IYS topic were treated as measurements of importance (as rational numbers) supplied by the survey responders, and applied as weights to guage interest in collabortion on specific topics.  Setting "not applicable" to a weight of 0 was straightforward. More arbitrary was choosing a quantitative difference to establish the contrast between choice "2: interesting but not immediately applicable" (perhaps for want of resources) and choice "5: vital to my work and should be a high priority for DFO." Choices with labels "1" to "5" could be given weights 0 to 4 or weights (0 to 4)^2^ or another weighting. Apart from ranking all of the topics, it was worth noticing topics frequently considered vital and high priority.  
+
+Choosing (voting) that a collaboration topic is "critical to my work and should be a high priority" was given 4X the weight of "interesting but unlikely" and the choice "not applicable" did not *directly* contribute to the scoring, but of course removed a count from another choice.  
+
+Results were biased from the initial selection of 361 survey recipients, from self-selection by the 1/3 that responded to at least 25 of the IYS topics, and perhaps subtley from from the order of the IYS themes and topics (although there was no tendancy to skip the last themes). Conversely, people who responded enthusiastically and thoroughly to survey about collaboration potential may be a representative sample (or the population!) of DFO staff who will be epicenters for future collaborations re salmon.  
+
+## Matrix Multiply  
+The choices "1" to "5" were weighted 0 to 4, and each row of a matrix of counts of choices (37 rows, 5 cols) is replaced by its weighted sum.  
+
+```{r score.all}
+# x0 is 163 by 37, y0 is 163 by 40 with name, region, jobcode.
+# x1 has only usefulresponses, 124 by 37. Ditto y1, 124 by 40.
+# x2 is the count of choices (1 to 5) by 124 responders, so 37 topics by 5 choices.
+# %*% is matrix multipy
+x3 <- x2 %*% (0:4) %>% ScaleTo10; 
+j1 <- order(x3, decreasing = T)
+(data.frame(Topic=topic[j1], Score = x3[j1])) %T>% kable(caption="Table x. Relative Importance of IYS Topics, scored by 124 survey choices, then scaled from 0 to 100");# %T>% Terse 
+```
+
+## Score by IYS Theme 
+The mean within themes of scores for topics.  
+```{r sc.th}
+x3.theme= x3 %>% tapply(fctr,mean) %>% ScaleTo10;
+j=order(x3.theme, decreasing = T)
+(data.frame(theme[j],x3.theme[j])) %>% kable(col.names=c("Theme", "Score"))
+```
+
+## Increased Contrast  
+To observed the effect of a different weighting, scoring and sorting was repeated with increased contrast, using weights = 0, 1, 4, 9, 16. Choice "5: critical" was thereby 4X more influential than with the previous scoring.
+```{r}
+x31 = x2 %*% (0:4)^2 %>% ScaleTo10; 
+j2= order(x31,decreasing=TRUE);
+data.frame(Topics=topic[j2], Score = x31[j2]) %>% kable;# %T>% Terse;
+```
+
+The order of topics was not appreciably changed by increase contrast. This suggests the order for choice 5 (vital, high priority) determines the order when choices are scored as a weighted sum. The topics with the top nine scores were identical with and without increased contrast in weights; this true for the bottom nine scores. Note this result was not split by job type.  
+
+```{r overlap, results="hold"}
+j1[1:10]; j2[1:10]
+(j1[ 1:10] %in% j2[ 1:10]) %>% print
+j1[28:37]; j2[28:37]
+(j1[28:37] %in% j2[28:38]) %>% print
+```
+
+### Scores as a Function
+We decided that scores from choices would be important for comparisons of collaboration topics between regions and job-types, and for job-types within Pacific Region.
+
+```{r inc.con}
+ScoreTopics = function (a){
+    # a is a matrix of counts by topics (row) and choices (col).
+    # fctr, topics, theme: inherited
+    a1 = a %*% (0:4) %>% ScaleTo10;
+    j= order(a1,decreasing=TRUE); 
+    data.frame(Topics=topic[j], Score = a1[j]) %T>% 
+        kable(col.names=c("Topic", "Score"));
+}
+ScoreThemes = function (a){
+    a1 = a %*% (0:4)
+    b.theme= a1 %>% tapply(fctr,mean) %>% ScaleTo10;
+    j=order(b.theme,decreasing = T);
+    data.frame(Theme=theme[j],Score=b.theme[j]) %>% 
+        kable(col.names=c("Theme", "Score")); 
+}
+```
+## Scores by Job  
+The preceding analysis, weighted sums of choices for IYS topics, is repeated for each of the seven job types. Because there are different numbers of respondents for each job type, they result is scaled 0 to 10 within each job type. This removes the effect of differing sample sizes. The result is presented as single table with job type as columns. To prevent confusion (maybe) the result for all job types (last column) is the mean of the scaled scores for each job type (preceding columns), but not scaled 0 to 10. The effect is to assign equal weight to each job type, after scaling.  
+```{r scoreJob}
+# x3 is the score for all 124 responses, vector 37
+# x1 is 124 by 37
+scoreJob <- matrix(nrow = 37,ncol = 8); 
+for(j in 1:7){
+    k <- y1$jobCode == jobCode$code[j];  # who has job j
+    a <- apply(x1[k,], 2, ChoiceTabSum);  # count of choices, 5 by 37
+    scoreJob[,j] <- t(a) %*% (0:4) %>% ScaleTo10;  # score
+}
+scoreJob[,8] <- scoreJob[,1:7] %>% apply(1,mean) %>% round(0) # previous, score for all 124 responses
+dimnames(scoreJob)=list(Topic = topic, Job = c(jobCode$code,"All"))
+scoreJob %>% kable; # %T>% Terse;
+```
+
+# Heat Maps by Job Type and Region  
+We applied a technique for grouping for IYS collaboration topics based on  how similar the responses were among topics by people who responded usefully to the survey (a matrix of 37 topics by five choices). The resulting dendrogram shows the hierarchy of groups and is the basis for rearranging the matrix. The frequency of choices in the rearranged matrix is presented as a scale of colours, a heat map, to show the pattern of choices within the resulting groups. This analysis was applied to the survey results partitioned by job types and regions.  
+
+## National Heat Map
+All job types and all regions combined. No attempt to make the sampling representative, so this describes the thorough survey respondents as if they were a representative sample of the population who will participate in collaboration via DFO Salmon Net(work). Which may well be the case. This was added later.
+```{r national}
+HMjob( y1,mainText="National Response",fac=NA,printWho=F)
+```
+
+### Another View 
+
+
+## Job Type  
+Because of small sample size, we excluded job type *Policy Analyst or Economist* with 3 reponders, and DFO region *Central and Arctic* with 1 responder. Caution might apply to results fro job type *Research Scientist* (13 responders) and *Manager (Staff)* (11 responders). The analysis was repeated with choice 1 *no,not applicable* removed, to emphasize where *any* collaboration would be valuable, and repeated again after summarizing the 37 choices according to the six IYS themes. 
+
+### DFO Managers (Staff)  
+```{r peopleManagers}
+HMjob(y1,"MA","DFO Managers (Staff)","jobCode")
+```
+
+### DFO Resource Managers  
+```{r resourceManagers}
+HMjob(y1,"RM","DFO Resource Managers")
+```
+
+### DFO Biologists  
+```{r biologists}
+HMjob(y1,"BI","DFO Biologists")
+```
+
+### DFO Scientists  
+```{r scientists}
+HMjob(y1,"RE","DFO Scientists")
+```
+
+### DFO Enhancement Staff  
+```{r enhancement}
+HMjob(y1, "HA","DFO Enhancement Staff")
+```
+
+
+## Interpretation: Collaboration Potential by Job Type  
+
+The clearest choices regarding collaboration were:  
+* disinterest in toxicology and in the role of salmon in societies  
+* interest but inability to collaborate, on linking salmon to climate change, including adaptation of salmon, and policy and management.  
+* existing activities need assistance with implmentation of existing/new science, with various aspects of data management including visualization, sharing, integration (IYS theme 5).  
+* suprisingly, the need collabortion with data managment did not have corresponding offers of knowledge, but there was interest in helping with data analysis and the implementation of science.  
+* The outstanding choice for as "critical to my work and should be a DFO priority" was field data, followed (all of equal importance) by First Nations opportunties, fisheries management and assessment, marine growth and survival, better science communication, and better field methods.  
+
+## Tentative Summary  
+DFO staff have a problem with data collection and management and this is likely blocking offers help with data analysis and improve management technology. Combined interest in stock assessment methodology with marine survival points to the fundamental problem of predictability for fisheries. Could it be that a lot of DFO staff know exactly what needs to be fixed, but cannot marshall the projects/programs necessary to accomplish that fix?  
+
+The impression I received from all of the responses to IYS topics was a call for modernization of the year to year business of fisheries managment in DFO. Better tools, sort of: more data more easily, better and more accessible methods for archiving, assembling and applying data. The route to accomplish this reflects the goal of the International Year of the Salmon (paraphrased): radically efficient collaboration across technical staff, biologists, scientists, and fishery managers has produced a quantum leap in the *application* of new and existing science.
+
+## By DFO Regions
+ Because of small sample sizes, we excluded DFO regions *Central and Arctic* with 1 responder, *National Capital Region*  with 2, and *Newfoundland and Labrador* with 3.  That leaves 4 regions: Maritimes with 16, Gulf with 7, Quebec with 5, and Pacific with 90.
+
+### Maritimes Region  
+
+```{r Maritimes}
+table(y1$region)
+# region codes, survey1: Pacific, Maritimes, Quebec, Gulf, Newfoundland, HQ, Central and Arctic.
+HMjob(y1, "Maritimes","Maritimes Region","region")
+```
+
+### Gulf Region  
+```{r Gulf}
+HMjob(y1, "Gulf","Gulf Region","region" )
+```
+
+### Quebec Region  
+```{r Quebec}
+HMjob(y1, "Quebec","Quebec Region","region")
+```
+
+### Pacific Region  
+```{r Pacific}
+HMjob(y1, "Pacific","Pacific Region","region")
+```
+
+# Within in the Pacific Region
+
+Pacific Region of DFO had 90 of the 124 useful responses, allowing a within-region analysis of collaboration choices for IYS topics by job type. The exception is *Policy and Economists*, with only two responders from Pacific (Angela Stadel, Elan Parl).
+
+Four DFO regions, namely Newfoundland and Labrador, Quebec, Gulf, and Maritimes deal with Atlantic Salmon instead of Pacific Salmon. They had 31 useful responses, including zero for job type *PO*. 
+
+```{r withinPacific}
+y1p=y1[y1$region == "Pacific",]
+y1a=y1[ !(y1$region %in% c("Pacific","Central and Arctic","HQ")) ,] # 31
+table(y1p$jobCode) %>% kable(caption = "Pacific", col.names=c("Job Type", "Frequency"))
+table(y1a$jobCode) %>% kable(caption = "Atlantic", col.names=c("Job Type", "Frequency"))
+```
+**Table x.** Frequency of Job Type within Pacific Region, from 90 useful survey responses.
+
+### DFO Pacific Managers (Staff)  
+```{r PacpeopleManagers}
+HMjob(y1p,"MA","DFO Pacific: Managers (Staff)")
+```
+
+### DFO Resource Managers  
+
+```{r PacresourceManagers}
+HMjob(y1p,"RM","DFO Pacific: Resource Managers")
+```
+
+### DFO Biologists  
+
+```{r Pacbiologists, fig.height=3}
+HMjob(y1p,"BI","DFO Pacific: Biologists")
+```
+
+### DFO Scientists  
+
+```{r Pacscientists}
+HMjob(y1p,"RE","DFO Pacific: Scientists")
+```
+
+### DFO Enhancement Staff  
+
+```{r Pacenhancement}
+HMjob(y1p, "HA","DFO Pacific: Enhancement Staff")
+```
+
+### DFO Engineering and Technical Staff  
+
+```{r PacEG}
+HMjob(y1p, "EG","DFO Pacific: Engineering and Technical Staff")
+```
+
+## Scores by Job: Comparing the Atlantic Salmon Regions to the Pacific Region
+As previously for DFO Canada-wide:  weighted sums of choices for IYS topics, for each job type. It is necessary to correct the scores for differing numbers of people in each job type (`r jobCode$code`). 
+
+The jobType *PO* was not included because it was insufficiently represented (2 responses). This same thing applies to *RM* for Atlantic (1 response from 4 regions), so that job type was not included in the Atlantic results. 
+
+
+Add a column that is the mean for "ALL" job types. This is not a weighted mean, the rationale is that each job type is equally important to DFO (boat don't float without techs *and* scientists *and* managers).
+
+```{r PacscoreJob}
+# x3 is the previous score for all 124 responses, vector 37
+# x1 is 124 by 37
+# y1p is Pacific region only,  90 by 40, with job,region, name
+# y1a is fourAtlantic regions, 31 by 40, with job,region, name
+jc=jobCode$code[-4] # delete PO
+PacCountJob <- numeric(6); names(PacCountJob) <- jc; AtlCountJob <- PacCountJob 
+PacScoreJob <- matrix(NA,nrow=37,ncol=7,dimnames=list(Topic=topic, Job=c(jc,"All"))); AtlScoreJob <- PacScoreJob
+# Pacific
+for(j in 1:6){
+    hasJob <-  y1p$jobCode == jc[j] # who has job
+    PacCountJob[j] <- sum(hasJob)
+    a <- y1p[hasJob,1:37] %>% apply(2,ChoiceTabSum); # count choices, 5 by 37
+    PacScoreJob[,j] <- t(a) %*% (0:4) # weighted sum of choices
+    PacScoreJob[,j] <-PacScoreJob[,j]/PacCountJob[j] # correct for sample size
+}
+PacScoreJob[,7] <- apply(PacScoreJob[,1:6],1,mean)
+print(round(PacScoreJob,1))
+cat("\nCount of Pacific job types",PacCountJob, "\nsum =",
+    sum(PacCountJob),"\n")
+# Atlantic 
+for(j in 1:6){
+    hasJob <-  y1a$jobCode == jc[j] # who has job
+    AtlCountJob[j] <- sum(hasJob)
+    a <- y1a[hasJob,1:37] %>% apply(2,ChoiceTabSum); # count choices, 5 by 37
+    AtlScoreJob[,j] <- t(a) %*% (0:4) # weighted sum of choices
+    AtlScoreJob[,j] <-AtlScoreJob[,j]/AtlCountJob[j] # correct for sample size
+}
+AtlScoreJob[,7] <- apply(AtlScoreJob[,c(1,2, 4,5,6)],1,mean) # mean by of job scores
+print(round(AtlScoreJob[,c(1,2, 4,5,6,7)],1))
+cat("\nCount of Atlantic job types",AtlCountJob, "\nsum =", sum(AtlCountJob),"\n")
+```
+
+```{r sortScoreJob}
+PacThemeScoreJob <-matrix(NA,6,7,dimnames=list(Theme=theme,JobCode=c(jc,"ALL")))
+AtlThemeScoreJob <- PacThemeScoreJob
+# Pacific
+for(j in 1:6) PacThemeScoreJob[,j] = tapply(PacScoreJob[,j],fctr,mean)
+PacThemeScoreJob[,7]= apply(PacThemeScoreJob[,1:6],1, mean)
+round(PacThemeScoreJob,1)
+# replace with scaled version. Note ALL is mean AFTER scaling, mean of scaled.
+PacThemeScoreJob[,1:6] <- apply(PacThemeScoreJob[,1:6], 2, ScaleTo10)
+PacThemeScoreJob[,7] <-  apply(PacThemeScoreJob[,1:6], 1, mean) %>% round(0)
+PacThemeScoreJob %>% kable(caption="Pacific")
+# Atlantic
+for(j in 1:6) AtlThemeScoreJob[,j] = tapply(AtlScoreJob[,j],fctr,mean)
+AtlThemeScoreJob[,7] <- apply(AtlThemeScoreJob[,c(1,2,4:6)],1, mean) # not RM
+round(AtlThemeScoreJob[,c(1,2,4:7)],1)
+AtlThemeScoreJob <- apply(AtlThemeScoreJob, 2, ScaleTo10)
+AtlThemeScoreJob[,7]  <-  apply(AtlThemeScoreJob[,c(1,2, 4,5,6)], 1, mean) %>% round(0) # not RM
+AtlThemeScoreJob[,c(1,2, 4:7)] %>% kable(caption="Atlantic")
+```
+
+### Topic Scaling
+For the Atlantic and Pacific groups,job scores by topics were scaled 1 to 10 (not ranked). This had to be done after aggregating to themes. 
+
+```{r}
+PSJS <- apply(PacScoreJob, 2, ScaleTo10) # within columns.
+PSJS[,7] <- PSJS[,1:6] %>% apply(1,mean) %>% round(0)
+PSJS[order(PSJS[,7], decreasing=TRUE),] %>% kable # sort by overall interest
+# Atlanic
+ASJS <- apply(AtlScoreJob, 2, ScaleTo10) # within columns.
+ASJS[,7] <- ASJS[,c(1,2,4:6)] %>% apply(1,mean) %>% round(0)
+ASJS[order(ASJS[,7], decreasing=TRUE), c(1,2,4:7) ] %>% kable # sort by overall interest
+```
+
+
+## Top Topics Plot
+The scores for IYS topics reflect interest in particpating in collaboration, something that cannot be entirely separated from personal (non-colaborative) interest or perceived future value regarding an IYS topic.  To compare and contrast this interest among job types, we asked: For topics with the highest scores for one or more job types (within Pacific Region), how does that topic score for other job types? Examination of the scaled *PacScoreJobs* produced 16 such topics. We observed a preponderance of topics from IYS themes 1 (current status of salmon) and 4 (connecting salmon to people), in contrast to themes 2 (future), 3 (new tech), and 5 (information systems). The top interests in collaboration for each job type in Pacific were applied to Atlantic fo comparison.
+OLD 1.1,1.2,1.3,1.5,1.7,1.8,2.3,3.1,3.7,4.1,4.2,4.3,    4.5,5.3,    6.3,6.4
+NEW 1.1,1.2,1.3,1.5,1.7,1.8,2.3,3.1,3.7,4.1,    4.3,4.4,4.5,5.3,6.2,6.3
+
+### Pacific Region
+```{r PacTopTopics, dpi=300}
+# (1.1,1.2,1.3,1.5,1.7,1.8,2.3,3.1,3.7,4.1, 4.2,4.3,4.5,5.3,6.3,6.4) # 16
+tops <- as.character(c(1.1,1.2,1.3,1.5,1.7,1.8,2.3,3.1,3.7,4.1,    4.3,4.4,4.5,5.3,6.2,6.3))
+nt <- length(tops)
+top  <-  which(substring(topic,5,7) %in% tops) 
+# 1  2  3  5  7  8 12 15 21 22 24 25 26 31 34 35 which of 37 topics
+jc=    jobCode[-4,1] # 6 without PO
+mainText=substring(topic[top],9) %T>% print # from nineth character on
+SetPar();par(xaxs="r");
+par(mfcol=c(4,4), mar=c(1,1,1,0) );
+for(j in 1:nt){
+    y=PSJS[top[j],1:6]  # how job types responded to a topic
+    plot(1:6,y, xlim=c(1,6),ylim=c(-1,11),xaxt="n",yaxt="n",
+    xlab="", ylab="",main=mainText[j], cex.main=0.8);
+    m=mean(y);    abline(h=m) # a horizontal line at the mean
+    segments(1:6, rep(m,6),1:6,y) # connect dot to horizontal line
+    axis(3,labels=F); axis(4,at=0:9,labels=F)
+    if(j < 5)  {axis(2,at=0:10,labels=c("0",NA,NA,NA,NA,"5",NA,NA,NA,NA,"10"), las=1)  # right hand
+        } else {axis(2,at=0:10,labels=F)}
+    if((j %% 4)==0){axis(1,at=1:6,labels=jc)} else {axis(1,labels=F)};  # bottom by modular arithmetic
+}
+mtext("Collaboration Interest Score",2, outer=T,line=0.5)
+mtext("Job Type",                    1, outer=T,line=0.75)
+mtext("Pacific Salmon",              3, outer=T,line=-0.25)
+```
+
+### Atlantic Region
+The same topics were applied to the four regions with Atlantic Salmon. That lumped: Quebec, Gulf, Maritimes, Newfoundland. Job type *RM* was omitted (1 response).
+```{r AtlTopTopics, dpi=300}
+SetPar();par(xaxs="r");
+par(mfcol=c(4,4), mar=c(1,1,1,0) );
+for(j in 1:nt){
+    y=ASJS[top[j],c(1,2,4:6)]  # how 5 job types responded to a topic, not RM 
+    plot(1:5,y, xlim=c(1,5),ylim=c(-1,11),xaxt="n",yaxt="n",
+    xlab="", ylab="",main=mainText[j], cex.main=0.8);
+    m=mean(y);    abline(h=m) # a horizontal line at the mean
+    segments(1:5, rep(m,5),1:5,y) # connect dot to horizontal line
+    axis(3,labels=F); axis(4,at=0:9,labels=F)
+    if(j < 5)  {axis(2,at=0:10,labels=c("0",NA,NA,NA,NA,"5",NA,NA,NA,NA,"10"), las=1)  # right hand
+        } else {axis(2,at=0:10,labels=F)}
+    if((j %% 4)==0){axis(1,at=1:5,labels=jc[c(1,2,4:6)])} else {axis(1,labels=F)};  # bottom by modular arithmetic
+}
+mtext("Collaboration Interest Score",2, outer=T,line=0.5)
+mtext("Job Type",                    1, outer=T,line=0.75)
+mtext("Atlantic Salmon",              3, outer=T,line=-0.25)
+```
+
+Amazing how different *RE* is compared to *MA* in term of indicated strong potential for collaboration.
+
+### Atlantic and Pacific
+Compare responses between Atlantic and Pacific by job type. 
+```{r TopTopics, dpi=300}
+SetPar();par(xaxs="r");
+par(mfcol=c(4,4), mar=c(1,1,1,0) );
+for(j in 1:nt){
+    y <- PSJS[top[j],1:6]  # how job types responded to a topic
+    plot(1:6,y, xlim=c(1,6),ylim=c(-1,11),xaxt="n",yaxt="n",
+        xlab="", ylab="",main=mainText[j], cex.main=0.8);
+    m=mean(y);    abline(h=m) # a horizontal line at the mean
+    segments(1:6, rep(m,6),1:6,y) # connect dot to horizontal line
+    y1 <- ASJS[top[j],c(1,2,4:6)]  # no RM
+    points(c(1,2,4:6),y1,pch=5,col="red") # skip jobtype at position 3
+    m=mean(y1);    abline(h=m, col="red")
+     axis(3,labels=F); axis(4,at=0:9,labels=F)
+    if(j < 5)  {axis(2,at=0:10,labels=c("0",NA,NA,NA,NA,"5",NA,NA,NA,NA,"10"), las=1)  # right hand
+        } else {axis(2,at=0:10,labels=F)}
+    if((j %% 4)==0){axis(1,at=1:6,labels=jc)} else {axis(1,labels=F)};  # bottom by modular arithmetic
+}
+mtext("Collaboration Interest Score",2, outer=T,line=0.5 ); 
+mtext("Job Type",                    1, outer=T,line=0.75); 
+```
+
+There are some sharp contrasts within job types between Atlantic and Pacific, in perceptions of opportunities for collaboration. Comparing Atlantic to Pacific:  
+* *MA* had less interest in field data, habitat assessment, and data sharing arrangements than their Pacific counterparts;  
+* *EG* were more intersted in marine survival/growth/migration and in fishery management/assessment;  
+* *BI* were very similar but more interested in field methods.  
+* *RE* were also similar but more interested in data sharing arrangements. 
+* *HA* differed by having much less interested in celebrating success and in outreach methods/awareness.  
+
+## Correlations Among Job Types within Top Topics
+```{r}
+cp <- cor(PSJS[top,1:6]) %>% `^`(2) %>% `*`(100) %>% round(0) %T>% print; 
+ca <- cor(ASJS[top,1:6]) %>% `^`(2) %>% `*`(100) %>% round(0) %T>% print; 
+cb <- cp # the bottom
+for (j in 1:5){
+    for(k in (j+1):6 ){
+        cb[j,k] <- ca[j,k];
+        if( j == 3 | k == 3) cb[j,k] <- NA
+    }
+}
+for (j in 1:6){
+    cb[j,j] <- cor(PSJS[top,j], ASJS[top,j]) %>% `^`(2) %>% `*`(100) %>% round(0)
+}    
+cb[3,3] <- NA
+cb
+```
+
+## Selected Topics for Themes
+```{r}
+repr=c(0,0,0,1,1,0,0,0,0,2,2,0,0,0,3,0,0,0,0,0,3,4,0,4,0,0,0,0,5,0,5,0,0,0,6,0,6)
+topic[repr!=0]
+
+```
+
+## Two Topics per Theme
+An experiment. ranking within job types was similar to considering all topics. Reducing the amount of information to describe collaboration interest by theme was interesting, but not included in the final analysis. EDA!
+
+```{r}
+reprTopicScores <- matrix(nrow=6,ncol=7)
+jc=c(jobCode[c(1:3,5:7),1],"ALL")
+for(j in 1:7) reprTopicScores[,j] <- tapply(PacScoreJob[,j],repr,mean)[-1]
+round(reprTopicScores,1)
+a <- reprTopicScores+NA
+dimnames(a)=list(Theme=theme,JobCode=jc)
+for(j in 1:7)a[,j] <- ScaleTo10(reprTopicScores[,j])
+kable( a) # ,col.names=c(jc,"ALL"), row.names=theme )
+```
+
+*finis* 
+

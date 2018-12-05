@@ -1,0 +1,317 @@
+---
+title: "Query neo4j on salmosphere"
+author: "Scott Akenhead scott@s4s.com 1-250-210-4410"
+date: '`r format(Sys.Date(),"%Y %B %d")`'
+output:
+  html_notebook: 
+    highlight: pygments
+    number_sections: yes
+    theme: journal
+    toc: yes
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+library(jsonlite, quietly=T);
+library(knitr, quietly=T);
+#library(ggplot2, quietly=T); 
+library(magrittr, quietly=T);
+#library(googlesheets, quietly=T);
+#library(openssl, quietly=T);
+#library(visNetwork, quietly=T); 
+library(RNeo4j, quietly=T);  # note caps
+
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	comment = "",
+	results = "hold")
+options(digits=5, show.error.locations=T, stringsAsFactors=F);
+```
+
+## Local Functions
+To assist others with similar work, a desultory effort co-locate the functions used in subsequent R chunks. Including myself after I am suprised to, yet again, rediscover this.  
+My functions start with a capital: CamelCase(). Variables are pythonCase: lostResult[]. The **Resource** objects in RoundTable are CamelCase bold: (:**IdeaTag**{}). 
+
+```{r local, echo=T}
+cat("working directory:",getwd(),"\n");
+col=c("skyblue","peachpuff","chartreuse", "seagreen") 
+# Peachpuff?! Seriously? What's next, puce? Or mauve? Maybe papaya whip?
+# 
+AddUID = function(a){
+    # add or update a column named "ID" in a data.frame
+    # numbering starts as lastUID+1
+    # lastUID is inherited from parent environment (be careful!).
+    last <- lastUID; 
+    n <-  dim(a)[1]; # n rows
+    a$ID <- seq.int(from=last+1,to=last+n, by=1)
+    lastUID <<- last+n;  # changes lastUID in parent environment (!)
+    return(a);  # modified
+    # examples: 
+    #   a <- AddUID(a)
+    #   a %<>% AddUID # using maggritr pipe 
+}
+
+#Macro=function(txt) eval(parse(text=txt)); # execute this text
+#MakeUID=function(n=1){  # cute, not used.
+#    make1=function() paste0(sample(c(LETTERS),9,replace=T),collapse='');
+#    if (n == 1) return(make1());
+#    uid=character(n)
+#    for(j in 1:n) uid[j] <- make1()
+#    return(uid)
+#}
+MakeUID=function(n=1){  # numeric 10 digit ID or IDs.
+   make1 <- function() round(1e10*runif(1),0);
+   if (n == 1) return(make1());  # scalar
+   uid <- numeric(n);  # allocate vector
+   for(j in 1:n) uid[j] <- make1();
+   return(uid);  # vector
+# example: print(MakeUID(), digits=10)
+}
+
+
+SampleRows <- function(a,caption=NA, nrows=10, ...){
+    # prints a random sample of rows
+    # you can pass "col.names" and other controls for kable().
+    n1=dim(a)[1];    
+
+    if (n1 <= nrows) 
+        {kable(a, caption=caption,...)
+    } else {
+        n2=min(nrows,n1)
+        j <- sort(sample.int(n1,n2)) 
+        kable(a[j, ], caption=caption,...); # keeps row number
+    }
+}
+```
+
+# Introduction
+Objectives: 
+1. open SalmoSphere.Net as super user.  
+2. start neo4j database engine, i.e. start a knowledge graph.  
+3. create a node by this simple query:  
+>CREATE (:Person{ID:1, nameString:"Hello World", })  
+-[hasActivity{type:"y", ID:2}]->  
+ (:Activity{name:"z",type:"",description:"", ID:3})
+
+# Open SalmoSphere.Net
+salmosphere.net, 71.19.255.237 (ECDSA)  
+via Tom Nightingale at Affinity Bridge: 
+>ssh -p 22222 salmosphere@salmosphere.net 
+salmosphere@salmosphere.net's password: 
+ J4Qxs6637dsDAf9p
+ 
+This will forward connections you make to your localhost:7687 to the server's localhost:7687, i.e. through the tunnel.  
+The response is: 
+>Linux ladysmith01 4.9.0-6-amd64 #1 SMP Debian 4.9.82-1+deb9u3 (2018-03-02) x86_64  
+Last login: Fri Mar  2 11:01:53 2018 from 97.107.183.7
+Mon Apr 30 10:08:05
+salmosphere@ladysmith01:~# 
+
+You can access the server via ssh (port 22222) with credentials:  
+Web user: salmosphere / J4Qxs6637dsDAf9p  affinitybridge  
+Sudo user: roundtable / umb74NtgjqdJmFwTaxu7l2kjT the default Structr admin   account creds: salmosphere.net:8082/structr admin / gi7ZZ9V62gfxe89e  
+
+The file locations on Debian Linux are described at 
+>https://neo4j.com/docs/operations-manual/current/configuration/file-locations/
+
+Configuration /etc/neo4j/neo4j.conf
+Data    /var/lib/neo4j/data
+Logs    /var/log/neo4j	
+Metrics /var/lib/neo4j/metrics
+Import  /var/lib/neo4j/import
+Bin     /usr/bin
+Lib     /usr/share/neo4j/lib
+Plugins /var/lib/neo4j/plugins
+
+But this is embedded in Structr:
+>salmosphere@ladysmith01:/usr/lib/structr/lib# 
+salmosphere@ladysmith01:/usr/lib/structr# cat structr.conf
+superuser.password = 4oXdm3hEISPC
+application.proxy.http.url = salmosphere.org
+CsvServlet.path = /s/structr/csv/*
+JsonRestServlet.path = /s/structr/rest/*
+HtmlServlet.path = /s/structr/html/*
+WebSocketServlet.path = /s/structr/ws/*
+UploadServlet.path = /s/structr/upload
+
+## instruction to install neo4j on SalmoSphere.net 
+https://neo4j.com/docs/operations-manual/current/installation/linux/debian/  
+https://support.structr.com/article/48
+
+## Start a local Neo4j database in a Mac OS (BSD Unix)
+The Neo4j database process must be **started** from Applications or LaunchPad on Mac.  
+The error messages from Neo4j are cryptic. The following means "You forgot to start Neo4j."  
+>Error in stop_for_content_type(req, expected = "application/atom+xml; charset=UTF-8") : 
+Expected content-type:
+application/atom+xml; charset=UTF-8
+Actual content-type:
+text/html; charset=UTF-8
+
+Within R, the default database is named *graph* and is opened at the default location: /Users/Scott2/Documents/Neo4j/default.graphdb  
+with username="neo4j", password="GaB-EX8-Rbx-Ny7")
+
+I removed authentication to more easily start a local knowledge graph in R:  
+1. find file: /Users/Scott2/Documents/Neo4j/.neo4j.conf  
+   use command-shift-. to see hidden files (obscure Mac trick)
+2. find line: dbms.security.auth_enabled=true
+3. edit "true" to be "false"
+
+I actually started Neo4j at 
+> /Users/Scott2/Documents/Neo4j/salmosphere.graphdb.
+
+This did not require changing the following URL to "open" the knowledge graph inside of R. 
+
+```{r openDB}
+#graph = startGraph("http://localhost:7474/db/data/")
+#salmosphere = startGraph("http://localhost:7474/db/data/")
+```
+This next chunk deletes the previous version of your database (but not the neo4j app). If there is a previous db, you will need to respond "Y" in the Rstudio console to permit this. 
+
+```{r clearDB, message=TRUE}
+#clear(graph) # else old graph persists. answer with capital Y
+```
+
+## Entering SalmoSphere.Net
+What we now have on SalmoSphere.Net is:  
+* a user, seemingly on salmonsphere@salmosphere.net that is actually salmosphere@ladysmith01.ct.coop with password J4Qxs6637dsDAf9p
+* a standalone instance of Neo4j 
+* a neo4j admin with login/pw neo4j / tumult-chunky-penates-dory-tiny-bistate 
+* Structr has been configured to use the stand-alone neo4j database as per https://support.structr.com/article/456 This has been tested and works.
+
+Steps:
+1. Open Terminal on MacBook
+> Scotts-MacBook-Pro-2:~ Scott$  
+ssh -p22222 salmosphere@ladysmith01.ct.coop -N -L 7687:localhost:7687
+
+salmosphere@ladysmith01.ct.coop's password: is J4Qxs6637dsDAf9p
+There will be no response, indicating the tunnel is open. 
+
+2. **Do not close Terminal.**  Tunnel on ladysmith01.ct.coop stays open.
+
+3. Open  this file as a Terminal by double-clicking on it. 
+(maybe better: execute this command after opening a new Terminal)
+/Applications/Neo4j\ Community\ Edition\ 3.2.2.app/Contents/Resources/app/bin/cypher-shell 
+>Last login: Fri May  4 14:01:28 on ttys001
+Scotts-MacBook-Pro-2:~ Scott$ /Applications/Neo4j\ Community\ Edition\ 3.2.2.app/Contents/Resources/app/bin/cypher-shell ; exit;
+username: neo4j
+password: ***************************************
+Connected to Neo4j 3.3.5 at bolt://localhost:7687 as user neo4j.
+
+Type :help for a list of available commands or :exit to exit the shell.
+Note that Cypher queries must end with a semicolon.
+Here we create a multi-statement transaction to CREATE two (:Person) nodes, bracked by commands :begin and :commit. Then we ask neo4j to show what we created via MATCH, then exit.
+>neo4j> CALL dbms.showCurrentUser();
+neo4j> :begin
+neo4j> CREATE (:Person{ID:606718296,resourceNodeTypeID: 11210, resourceNodeSubTypeID:0, label:"Carrie Holt", namestring:"Dr. Carrie Holt, Ph.D.", prefix:"Dr.", FirstNamesOrInitials:"Carrie", middleNamesOrInitials:"", familyName:"Holt", familySuffix: "", honorificSuffix:"Ph.D.", description:"Fisheries Scientist", status:"active", start_date:"2009-08-07", end_date:""});
+neo4j> CREATE (:Person{ID:606718297,resourceNodeTypeID: 11210, resourceNodeSubTypeID:0, label:"Jim Irvine", namestring:"Dr. James R. (Jim) Irvine, Ph.D.", prefix:"Dr.", FirstNamesOrInitials:"Jim", middleNamesOrInitials:"R.", familyName:"Irvine", familySuffix: "", honorificSuffix:"Ph.D.", description:"Salmon Ecologist", status:"active", start_date:"2010-09-08", end_date:""});
+neo4j> :commit
+neo4j> MATCH (p:PERSON)  RETURN p;
+neo4j> :exit
+ 
+
+
+cypher-shell [-h] [-a ADDRESS] [-u USERNAME] [-p PASSWORD] [--encryption {true,false}] [--format {verbose,plain}] [--debug] [--non-interactive] [-v] [--fail-fast | --fail-at-end] [cypher]
+
+$neo4j-home> bin/cypher-shell -u johndoe -p secret
+
+/Applications/Neo4j Community Edition 3.2.2.app/Contents/Resources/app/bin/cypher-shell -a localhost:7687 -u neo4j -p tumult-chunky-penates-dory-tiny-bistate
+
+With 3.0.x to enabled remote clients to connect to a HTTPS enabled browser the following parameters in the $NEO4J_HOME/conf/neo4j.conf need to be changed from the default of
+   #dbms.connector.https.address=localhost:7473
+to  dbms.connector.https.address=0.0.0.0:7473
+The change from localhost:7473 to 0.0.0.0:7473 will allow for remote connections to https://<Neo4j_Host_IP>:7473
+
+
+
+SSH     Command	Explanation
+ssh     user@serverip 
+ls	    Show directory contents (list file names).
+cd  	Change Directory.
+mkdr	Create a new folder (directory).
+touch	Create a new file.
+rm	    Remove a file.
+cat	    Show contents of a file.
+pwd	    Show current directory (full path to where you are right now).
+cp	    Copy file/folder.
+mv	    Move file/folder.
+grep	Search for a specific phrase in file/lines.
+find	Search files and directories.
+vi/nano	Text editors.
+history	Show last 50 used commands.
+clear	Clear the terminal screen.
+tar	    Create & Unpack compressed archives.
+wget	Download files from the internet.
+du	    Get file size.
+
+# Load the Knowledge Graph  
+## Constraints  
+Preventing duplication of nodes is enforced by *addConstraint* where the key is a named field in the node that will be unique, such as an email. Note that two people can have the same name (but in that case not the same email), so we **will** need to add a unique identifier to Person to ensure uniqueness and enable constraint (e.g. email for a specific person).  I used rneo4j::addConstraint(), a function that is the equivalent of the Cypher query:
+>CREATE CONSTRAINT ON (p:Person)
+       ASSERT p.name IS UNIQUE
+
+```{r constrain,message=TRUE}
+# prevent duplication of nodes
+addConstraint(graph, label="Person",         key="name")
+addConstraint(graph, label="Place",          key="name")
+addConstraint(graph, label="Activity",       key="nameShort")
+addConstraint(graph, label="Organization",   key="nameShort")
+addConstraint(graph, label="ContactService", key="email")
+getConstraint(graph) # all
+```
+
+## Base fields and special fields
+Every Resource has 9 base fields:
+ID, resourceNodeTypeID, resourceNodeSubTypeID, label, name, description, status,start_date,end_date.  
+Most have a few special fields. If an instance of a node does not have a field, RoundTable handles that as a missing value: blank if string, NA if numeric.
+
+## Person Has ContactService 
+To avoid duplicating nodes, I created the nodes first, along with links to nodes that are unique to a new node, e.g. Person has contactService. Subsequently I MATCH existing nodes to create relationships. This has the advantage of using rNeo4j syntax which is simpler than Cypher queries.
+```{r oneP}
+# create one Person
+p <- createNode(graph,"Person", 
+    ID = 9876543210,
+    resourceNodeTypeID = 11210,
+    resourceNodeSubTypeID = 1,
+    label = "Hello World",
+    name = "Mr. Hello New (Hi) World jr., PhD",
+    description = "The one and only, the node you know you love, live from the fabulous Akenhead Beach Resort, give it up for... Hello World!",
+    status = "active",
+    start_date = "2018-01-01",
+    end_date = "2099-12-31",
+    nameString = "Mr. Hello New (Hi) World jr., PhD",
+    prefix = "Mr.",
+    firstNamesOrInitials = "Hello",
+    middleNamesOrInitials = "New",
+    familyName = "World",
+    familySuffix = "jr.",
+    honorificSuffix = "PhD")  # end of function call
+
+```
+
+## Queries to Create Examples of all Nodes and Edges
+One of everything as a test bed for  
+(a) compliance with RoundTable default domain description, and  
+(b) data binding between neo4j, Structr, and javascript in RoundTable.  
+I did this via dataframe for 23 resource types with 9 basic fields.
+```{r exampleNodes}
+#dir="/Users/Scott/Documents/Projects/SalmoSphere/data"
+a = scan(file="stdin");
+
+a;
+
+rsrc=data.frame(
+    Resource=c("Person", Activity", "Organization",))
+p <- createNode(graph,"Activity", 
+    ID = MakeUID(),
+    resourceNodeTypeID = 11210,
+    resourceNodeSubTypeID = 1,
+    label = "Hello World",
+    name = "Mr. Hello New (Hi) World jr., PhD",
+    description = "The one and only, the node you know you love, live from the fabulous Akenhead Beach Resort, give it up for... Hello World!",
+    status = "active",
+    start_date = "2018-01-01",
+    end_date = "2099-12-31",
+
+
+```

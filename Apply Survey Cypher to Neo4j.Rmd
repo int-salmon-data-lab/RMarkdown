@@ -1,0 +1,344 @@
+---
+title: "Apply Survey Cypher to Neo4j"
+author: "Scott Akenhead scott@s4s.com 1-250-210-4410"
+date: '`r format(Sys.Date(),"%Y %B %d")`'
+output:
+  html_notebook: 
+    highlight: pygments
+    number_sections: yes
+    theme: journal
+    toc: yes
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+#library(jsonlite);
+library(knitr);
+#library(ggplot2); 
+library(magrittr);
+#library(googlesheets);
+#library(openssl);
+#library(visNetwork); 
+library(RNeo4j);  # note caps
+
+knitr::opts_chunk$set(
+	message = FALSE,
+	warning = FALSE,
+	comment = "",
+	results = "hold")
+options(digits=5, show.error.locations=T, stringsAsFactors=F);
+```
+
+
+# Start Neo4jDatabase
+The Neo4j database process must be **started** from Applications or LaunchPad.
+The error messages from Neo4j are cryptic. The following means "You forgot to start Neo4j."
+
+>Error in stop_for_content_type(req, expected = "application/atom+xml; charset=UTF-8") : 
+  Expected content-type:
+application/atom+xml; charset=UTF-8
+Actual content-type:
+text/html; charset=UTF-8
+
+Within R The default database *graph* is **opened**  at the default location:
+> /Users/Scott2/Documents/Neo4j/default.graphdb.
+    username="neo4j", password="GaB-EX8-Rbx-Ny7")
+    
+
+Remove authentication to more easily start a knowledge graph in R, **as I did**:  
+1. find file: /Users/Scott2/Documents/Neo4j/.neo4j.conf  
+   use command-shift-. to see hidden files (obscure Mac trick)
+2. find line: dbms.security.auth_enabled=true
+3. edit "true" to be "false"
+
+I actually started Neo4j at 
+> /Users/Scott2/Documents/Neo4j/salmosphere.graphdb.
+
+This did not require changing the following URL to "open" the knowledge graph inside of R. 
+
+```{r openDB}
+graph = startGraph("http://localhost:7474/db/data/",username="neo4j", password="GaB-EX8-Rbx-Ny7")
+
+#graph = startGraph("bolt://localhost:7687",username="neo4j", #password="tumult-chunky-penates-dory-tiny-bistate")
+
+```
+This next chunk deletes the previous version of your database (but not neo4j app).
+If there is a previous db, you will need to respond "Y" in the Rstudio console to permit this. 
+
+```{r clearDB, message=TRUE}
+clear(graph) # else old graph persists. answer with capital Y
+```
+
+# Load the Knowledge Graph
+## Constraints
+Preventing duplication of nodes is enforce by *addConstraint* where the key is some field in the node that will be unique, such as an email. Note that two people can have the same name (but not email), so we **will** need to add a unique identifier to Person to ensure uniqueness and enable constraint (e.g. email for a specific person).  I used rneo4j::addConstraint, a function that is the equivalent of the Cypher query:
+>CREATE CONSTRAINT ON (p:Person)
+       ASSERT p.name IS UNIQUE
+
+```{r constrain,message=TRUE}
+# prevent duplication of nodes
+addConstraint(graph, label="person",         key="label")
+addConstraint(graph, label="place",          key="label")
+addConstraint(graph, label="activity",       key="label")
+addConstraint(graph, label="organization",   key="label")
+addConstraint(graph, label="contactService", key="label")
+getConstraint(graph) # all
+```
+
+## Person Nodes 
+To avoid duplicating nodes, I created all the nodes first. Then links.
+
+```{r person}
+MakeNode <- function(qr){
+    n=length(qr); cat(n,"queries\n")
+for(j in 1:n) cypher(graph,qr[j]);
+```
+## Activity 
+```{r activity}
+for(j in 1:dim(Activity)){  # 90
+    p <- createNode(graph,"Activity", 
+        name=Activity[j,"Activity.name"], 
+        description=Activity[j,"Activity.description"]);
+}    
+```
+
+##PersonHasActivity
+### Read Edited
+Person Has Activity was hand-edited in the Google Sheet named  
+"TEMPLATE Additions to Knowledge Graph 2018 March"  
+in the sheet named "PersonHasActivity"  
+https://docs.google.com/spreadsheets/d/1X0ZHxVPLdt2wwFdJB_j0jn3vB_pNsvqodKlHtu2p81Q/edit?usp=sharing
+This has zero security,"published to the web."
+
+```{r gs7}
+ss7 <- gs_key("1X0ZHxVPLdt2wwFdJB_j0jn3vB_pNsvqodKlHtu2p81Q")
+# IYS Row
+PersonHasActivity1 = gs_read(ss7,ws="PersonHasActivity")  %>% as.data.frame()
+# unmess. 1 extra row at top, 2 extra columns on right
+PersonHasActivity1 <-PersonHasActivity1[-1,1:2]
+colnames(PersonHasActivity1) <- c("Activity.nameShort",
+    "Person.name")
+PersonHasActivity1[1,]
+```
+
+### Create Links
+Neo4j tells me "Only directed relationships are supported in CREATE." However **(n)--(m)** is a valid pattern to find a link in either direction between nodes n and m. 
+
+The following query is applied many times in the next chunk of R code. 
+>MERGE (p:Person{name:"First Last"}) 
+ MERGE (a:Activity{nameShort:"Some Activity"})
+ CREATE (p) -[:hasActivity]-> (a) 
+ RETURN p.name,a.nameShort 
+ 
+*Added 2 labels, created 2 nodes, set 2 properties, created 1 relationship, started streaming 1 records after 22 ms and completed after 22 ms.* 
+
+This is relatively slow way to load the knowledge graph (45 s^-1). Some buffer for queries is implied because the queries are generated much faster.
+
+```{r}
+for(j in 1:dim(PersonHasActivity1)[1]){  # I used j=1 for testing
+    query <- paste0(
+'MERGE (p:Person{name:"',PersonHasActivity1$Person.name[j],'"}) 
+ MERGE (a:Activity{nameShort:"',PersonHasActivity1$Activity.nameShort[j],'"})
+ CREATE (p) -[:hasActivity]-> (a) 
+ RETURN p.name,a.nameShort ')
+    cypher(graph,query)    
+}
+```
+
+This added new Person nodes (perhaps including misspelt duplication) resulting in 461 Person.
+### Frequency of Activity per Person
+How many of **Person** have 1, 2, or 3 links to an **Activity**? The Cypher function *size()* counts links. Here is the resulting distribution of Activity per Person. Almost two thirds of Person nodes are linked to zero Activity (yet), but 24% are linked to one Activity and 12% to two or more (one Person has seven Activity).
+```{r PhasAct}
+query <- 'MATCH (p:Person) RETURN size( (p)-[:hasActivity]->() )'
+cypher(graph,query) %>% table %>% `/`(461/100) %>% round(1) %>%
+    kable(col.names=c("Links","%"),caption="Density of Activities per Person (461 cases)")
+```
+
+## Idea
+Many (more than 124 out of 163) survey respondents are linked to many **Idea** nodes representing the 37 IYS topics because they indicated those topics were something they needed, offered, or thought to be critical. 
+>(:Person) -[:hasIdea]-> (:Idea) 
+Those 37 **Idea** nodes are linked to 6 more **Idea** nodes representing the IYS themes: **Idea hasIdea Idea**. Additional **Idea** nodes "Other" IYS topics were proffered, each is a new **Idea** linked to a **Person**.
+
+Separtely from the IYS topics, the survey asked for key words associated with each **Activity**, creating another set of **Idea** nodes with links
+>(:Activity) -[:hasIdea]-> (:Idea) 
+
+The result is that two separate **Person** can, in theory be linked through concepts associated with their separate projects:
+>(:Person) -[:hasActivity]--[:hasIdea]- (:Idea) -[:hasIdea]- (:Activity) - (:Person)
+
+However few of the orginal key words are found in more than one **Activity**. 
+
+```{r iysIdea}
+# IYS topics (37) and themes (6)
+n=dim(IdeaTag)[1]
+for(j in 1:n) createNode(graph,"Idea",
+    name=IdeaTag.name[j,1], description=IdeaTag.name[j,2] );
+
+# Activity key words
+n=dim(IdeaTagA)[1]
+for(j in 1:n) createNode(graph,"Idea",
+    name=IdeaTagA.name[j,1], description=IdeaTagA.name[j,2] );
+```
+### Idea Has Idea
+```{r II}
+# link IYS topic to IYS theme
+n=dim(IdeaTagHasIdeaTag)[1];
+for(j in 1:n){
+    query=paste0(
+    'MATCH (i1:Idea{name:"',IdeaTagHasIdeaTag[j,1],'"})
+     MATCH (i2:Idea{name:"',IdeaTagHasIdeaTag[j,2],'"})
+     CREATE (i1) -[:hasIdea]-> (i2)');
+    cypher(graph,query)
+}
+```
+### Activity Has Idea
+```{r AI}
+# colnames(ActivityHasIdeaTag) # "X" "Activity.name" "IdeaTag.name"
+n=dim(ActivityHasIdeaTag)[1];
+for(j in 1:n){
+    query=paste0(
+    'MATCH (a:Activity{name:"',ActivityHasIdeaTag[j,2],'"})
+     MATCH (b:Idea{name:"',    ActivityHasIdeaTag[j,3],'"})
+    CREATE (a) -[:hasIdea]-> (b)');
+    cypher(graph,query)
+}
+
+ 
+    
+'MERGE (p:Person{name:"',PersonHasActivity1$Person.name[j],'"}) 
+ MERGE (a:Activity{nameShort:"',PersonHasActivity1$Activity.nameShort[j],'"})
+ CREATE (p) -[:hasActivity]-> (a) 
+ RETURN p.name,a.nameShort ')
+    cypher(graph,query)    
+```
+
+
+
+# DFO Region
+a = unique(placeAddress$region)
+for(j in 1:length(a)){
+    createNode(graph,"Organization",type="DFO Region", name=a[j])
+}
+# Place has Address
+for(j in 1:length(placeAddress)){
+    pl <- createNode(graph,"Place",
+        name=placeAddress[j,"place"],
+        latLong=placeAddress[j,"latLong"],
+        photo=placeAddress[j,"photo"],
+        webPage=placeAddress[j,"webPage"]);
+    ad <- createNode(graph,"Address", 
+        poBox=placeAddress[j,"poBox"],
+        address=placeAddress[j,"address"],
+        city=placeAddress[j,"city"],
+        province=placeAddress[j,"province"],
+        postalCode=placeAddress[j,"postalCode"] )
+    createRel(pl,"hasAddress",ad)
+```
+
+
+### Person with Unique Links 
+Create the Person nodes one by one, and, upon creation, link them to other nodes which are not a list. E.g. email is unique to each person, so
+
+>CREATE (p:Person{name:""})
+WITH p
+CREATE (p) -[hasContactService]- (ContactService{email:""}) 
+
+Similarly, each Person has one Place (so far) but each Place can have more than one Person, and also (:Place{name:""} has a constraint that prevents any new Place from having the same name as an existing Place (uniqueness). This prevents duplicating nodes. 
+
+>MERGE (p) -[hasPlace{type:"building"}]- (:Place{name:""})
+
+
+```{r personHasOne}
+nr <- dim(survey1)[1]
+for(j in 1:nr){
+query=paste0('CREATE (p:Person{name:"',
+survey1[j,"name"],
+'", firstName:"',
+survey1[j,"firstName"],
+'", lastName:"',
+survey1[j,"lastName"],
+'"}) WITH p 
+MERGE (p) -[:hasOrganization{jobTitle:"',
+survey1[j,"jobTitle"],
+'",jobCode:"',
+survey1[j,"jobCode"], 
+'",jobDescription:"',
+survey1[j,"jobDescription"],
+'",jobChain:"',
+survey1[j,"branchDirectorateSector"],
+'"}]-> (:Organization {name:"',
+survey1[j,"region"],
+'"}) MERGE (p) -[:hasPlace{type:"building"}]->(:Place{name:"',
+survey1[j,"place"],
+'"}) CREATE (p) -[:hasContactService]-> (:ContactService {email:"',
+survey1[j,"email"], 
+'"})' 
+) # end paste
+# query 
+cypher(graph,query)
+} # end loop
+```
+### Samples of Nodes
+Random samples to check that nodes are as expeted.
+```{r sampleNodes}
+a <- cypher(graph,'MATCH (p:Person) RETURN p.name');
+SampleRows(a, "Sample of (:Person)")
+cat("Found",dim(a)[1],"of which", sum(is.na(a[,1]))," are not NA\n")
+a <- cypher(graph,'MATCH (p:ContactService) RETURN p.email');
+SampleRows(a, "Sample of (:ContactService)")
+cat("Found",dim(a)[1],"of which", sum(is.na(a[,1]))," are not NA\n")
+a <- cypher(graph,'MATCH (p:Place) RETURN p.name');
+SampleRows(a,  "Sample of (:Place)")
+cat("Found",dim(a)[1],"of which", sum(is.na(a[,1]))," are not NA\n")
+a <- cypher(graph,'MATCH (p:Organization) RETURN p.name');
+SampleRows(a, "Sample of (:Organization)")
+cat("Found",dim(a)[1],"of which", sum(is.na(a[,1]))," are not NA\n")
+```
+
+### Person Has Lists
+Some of the survey data are lists. E.g. *webPage* can be a comma-separated list such as
+>http://www.pac.dfo-mpo.gc.ca/sep-pmvs/index-eng.html, https://www.psf.ca/what-we-do/community-salmon-program, http://dfo-mpo.gc.ca/oceans/crf-frc/index-eng.html, http://www.dfo-mpo.gc.ca/pnw-ppe/rfcpp-ppcpr/index-eng.html,  http://fwcp.ca/
+
+Some data are lists of list, converted by hand to quoted lists of comma-separated lists, e.g. *Activity1KeyPeople* such as
+>"Wilf Luedke, Area Chief Stock Assessment, DFO, wilf.luedke@dfo-mpo.gc.ca", 
+"Diana Dobson, Stock Assessment Biologist, DFO, Diana.dobson@dfo-mpo.gc.ca",
+"Tawney Lem, Executive Director, West Coast Aquatic Management Association,  tawney@westcoastaquatic.ca",
+"Mike Austin, Conuma Hatchery Manager, DFO, mike.austin@dfo-mpo.gc.ca"
+
+Yet other data are lists but separated into separate fields in the survey responses, e.g. on Person can have *activity1, activity2, activity3* and each of those is a list: *Title, Description, YourRole,	WebLink, Location, KeyPeople, Keywords* and four of those can be lists. These are dealt with one Person at a time, unpacked by loops in R, and re-created in Neo4j. The survey was edited to avoid duplicate activities. Many of the links from an activity will be to previously existing nodes. Duplication of nodes is avoided by (1) constraints added to the database design, and (2) use of MERGE instead of CREATE.  
+
+```{r personHasList}
+
+act <- c("activity1Title","activity2Title","activity3Title")
+des <- c("activity1Description","activity1Description",
+         "activity1Description")
+
+for(j in 1:nr){
+    for(k in 1:3){
+        if(is.na(survey1[j,act[k]])) next;
+#       createNode(graph, "Activity", name = survey1[j,act[k]], 
+#                              description = survey1[j,des[k]])CREATE p MATCH-[:hasActivity]-(:Activity{name:"', 
+survey1[j,act[k]],
+'", description:"', survey1[j,des[k]], '"})' )
+        cypher(graph,query)
+    }
+}
+a <- cypher(graph,'MATCH (a:Activity) RETURN a.name,a.description'); 
+SampleRows(a,"Sample of (:Activity)") 
+
+'"})
+CREATE p -[:hasURL] ->(:URL{url:"',
+survey1[j,"webPage"],
+
+
+```
+
+  
+ CREATE (:Person{name:survey.person}) -[:hasContactService]-> (:ContactService {email:survey.email, phone:survey.telephone})
+MERGE  (at:Place{name:survey.place})
+MERGE (org3:Organization{name:survey.org3,type:"org3"})
+MERGE (org2:Organization{name:survey.org2,type:"org2"})
+MERGE (org1:Organization{name:survey.org1,type:"org1"})
+RETURN at.name, org2.name' );
+
+```
+

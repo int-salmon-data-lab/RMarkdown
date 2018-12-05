@@ -1,0 +1,669 @@
+---
+title: "Load Neo4j Database from 2017 October Survey for DFO Salmon Network"
+author: "Scott Akenhead scott@s4s.com 1-250-210-4410"
+date: "2018 February 15"  
+output:
+  html_notebook:
+    number_sections: yes
+    theme: journal
+    toc: yes
+    toc_depth: 2
+  html_document:
+    df_print: paged
+    toc: yes
+    toc_depth: '2'
+---
+
+```{r setup, include=FALSE}
+library(knitr, quietly=T);
+library(ggplot2, quietly=T); 
+library(magrittr, quietly=T);
+library(googlesheets, quietly=T);
+library(openssl, quietly=T);
+library(visNetwork, quietly=T); 
+library(RNeo4j, quietly=T);  # note caps
+
+knitr::opts_chunk$set( message = FALSE, warning = FALSE, comment = "", results = "hold")
+options(digits=5, show.error.locations=T, stringsAsFactors=F);
+# "`r format(Sys.Date(),"%Y %B %d")`"  
+
+```
+
+# Introduction
+SalmoSphere.net is a website that acts as a hub for the DFO Salmon Net and any subsequent Canadian Salmon Net. The DFO people with salmon-related jobs are *community of practise* and that community, i.e. the participants in this network, is the *domain* for sharing knolwedge. The objective is improved knowledge sharing and collaboration such that subsequent decisions and actions are better informed and more efficient. 
+
+This knowledge sharing is based building an extensive and  richly cross-linked *knowledge graph* for people to explore (knowledge discovery). It will be successful to the extent that users contribute further knowledge including new links between existing *resource nodes* (knowledge assembly). The technology involves an on-line Neo4j database (on Linux and Apache) and presented by the RoundTable^tm^ user interface (via Structr CMS queries that provide JSON from Neo4j) so that users can filter, sort, and search for knowledge useing an interactive TableView and, more directly representative of the Knowledge Graph, an interactive GraphView. 
+
+This community of practise received a survey to indentify opportunities for collaboration. The resuling data was edited in Google Sheets (for collaboration and safety). These sheets are to be read and transformed in R to simplify subsequent (another R notebook) loading into the knowledge graph via Cypher queries.  The R functions, workflow, and R code for this are the contents of this R notebook. The result is a suite of .Rdata files with the extracted data as tables that attempt to retain the explicit and implicit relationships (links) between data objects (nodes).
+
+## Local Functions
+An effort is made to co-locate R functions used in the following R code. This will facilitate a possible R package to assist others with similar work. The display, but not the creation, of these functions is turned off for this version of the notebook.
+
+```{r local, echo=T}
+cat("working directory:",getwd(),"\n");
+dirIn <- ""     # from
+dirOut<- "Data" # write R datasets here (later load)
+col=c("skyblue","peachpuff","chartreuse", "seagreen")
+# my functions start with a capital: camel case not python
+
+Macro <- function(txt){eval(parse(text=txt))}; # execute string txt
+
+I <- function(j){j=j+1L} 
+# example: n <- 99L; n%<>%I; n; # 100
+
+# `%I%`<-function(x,y){x%<>% `+`(y);return(x)}; 
+# eg. a=3; a%I%1; a; # 4
+
+SampleRows <- function(a,caption, ...){# can pass colnames,,
+    # random sample of rows
+    n1=dim(a)[1];    n2=min(10,n1)
+    j <- sort(sample.int(n1,n2)) 
+    print(kable(a[j, ], caption=caption,...)); # keeps row number
+}
+
+# List2Rows() multiplies rows to unwind a list in a cell
+source("../R/List2Rows.R") # assumes getwd() for  is "someting/R"
+
+# Correspond() matches two columns with scattered repeats
+source("../R/Correspond.R") 
+
+Unpack <- function(txt){
+    if(txt=="") return(""); # avoids character(0) as result
+    strsplit(txt,',') %>% unlist %>% trimws; # assumes comma is separator
+}
+
+UnpackQ1 = function(txt){
+# input - txt - a character string with fields separated by commas and or paired quotes.
+# result - a vector of text strings, some of which may contain commas.
+# method - break into 
+#    (a) text within quotes, where the quoted text may contain commas, and
+#    (b) text separted by commas, but outside of quotes.
+if(is.na(txt)) return(NA);
+# remove blanks after commas; *** FAILS if >3 blanks
+txt <- gsub(',  ',  ',', txt);  # fix two blanks after comma
+txt <- gsub(', ',   ',', txt);  # fix one blank (could be the third blank)
+# break out quoted strings, if any. 
+a <- gregexpr('"+',txt)  # find all quotes. error if not paired.
+if (a[[1]][1] == -1) return(Unpack(txt))  # no quotes? then simple.
+jres <- 0  # counter for res (result)
+res <- before <- between <- new("list"); 
+place <- as.numeric(a[[1]]);  # positions of quotes in input
+n=length(place)
+if(length(place) %% 2 == 1) stop("UnpackQ1 sees unpaired quotes");
+for(j in seq(2,n,2)){
+    between[j] <- substr(txt, place[j-1]+1, place[j]-1 ) # inside quotes
+    if (j==2) {before[j] <- substr(txt, 1, place[j-1]-2 ) } else {
+               before[j] <- substr(txt, place[j-2]+2, place[j-1]-2) };
+    }
+    before[j+2] <- substring(txt, place[j]+2) # string after last quote, maybe ""
+# break the comma-separated parts. Insert text from inside quotes. Keep sequence.
+for(j in seq(2,n,2)){  # for each pair of quotes
+    d <- Unpack(before[[j]]);
+    for(k in 1:length(d)){ jres %<>%I; res[jres] <- d[[k]]}; # split by commas
+    jres %<>%I; res[jres] <-between[[j]]; # insert text from between quotes
+}
+if(before[[j+2]] != ""){  # if string does not end with a quote
+    d <- Unpack(before[[j+2]]) # after last quote
+    for(k in 1:length(d)){ jres %<>%I; res[jres] <- d[[k]]}; # split by commas
+}    
+# clean up empty fields    
+    res <- unlist(res)
+    res <- res[res != ""]
+return(res);
+}   
+# eg: UnpackQ1(c('dog,"mud,shedding",cat,"fleas, attitude"'))
+#            [1] dog [2] mud,shedding [3] cat [4] fleas, attitude
+# unpackQ1(c('"stock-recruit models", "smolt survival models", "statistics"'))
+#         [1] "stock-recruit models" [2] "smolt survival models" [3] "statistics"
+
+UnpackQ2 = function(txt){ 
+    # unpacks one QCSV string: Quoted, Comma Separated Variables. e.g. from a spreadsheet cell
+    # txt -  a character string not a vector. No third level commas (within fields within quotes) 
+    # remove 2 levels of commas: (1) between quotes in the string, between fields within quotes.
+    # result is a list (from quotes) of character vectors (fields, from commas)
+    if(is.na(txt)) return("NA");
+    # remove blanks after comma outside of quotes; *** FAILS if >1 blank
+    txt = gsub('", "','","', txt);  # fix one blank after comma
+    txt = gsub('",  "','","', txt); # fix two blanks
+    # break out quoted strings, make into a character vector
+    txt <- strsplit(txt, '","' ) %>% unlist
+    # remove residual quotes, leading blanks, and trailing blanks, within strings
+    #gsub('"','',txt) # works over all items in a character vector
+    #txt <- trimws(txt)
+    n=length(txt) # how many quoted pieces?
+    b=vector("list",n);
+    for(j in 1:n){
+    b[[j]] <- txt[j] %>% gsub('\"','',.) %>% strsplit(.,',') %>% unlist %>% trimws;
+    } 
+    return(b)
+}
+
+# example
+#a=' "Wilf Luedke, Area Chief Stock Assessment, DFO, wilf.luedke@dfo-mpo.gc.ca", "Diana Dobson,, DFO, Diana.dobson@dfo-mpo.gc.ca","Tawney Lem, Executive Director, West Coast Aquatic Management Association,  tawney@westcoastaquatic.ca"'
+# UnpackQ2(a)  # note missing field indicated as: ,,
+# [[1]]
+# [1] "Wilf Luedke"
+# [2] "Area Chief Stock Assessment"
+# [3] "DFO"
+# [4] "wilf.luedke@dfo-mpo.gc.ca"
+# [[2]]
+# [1] "Diana Dobson"
+# [2] ""
+# [3] "DFO"
+# [4] "Diana.dobson@dfo-mpo.gc.ca"
+# [[3]]
+# [1] "Tawney Lem"
+# [2] "Executive Director"
+# [3] "West Coast Aquatic Management Association"
+# [4] "tawney@westcoastaquatic.ca"
+
+
+```
+
+# Data
+## Survey for the DFO Salmon Network  
+The survey was named **DFO Salmon Net: People and Projects** with 351 selected recipients from within DFO who were contacted by email 2017 September and October. A .csv file with 163 responses was downloaded from Survey Monkey after the survey was closed 2017 October 29. Many responses were incomplete. The raw survey data is
+[HERE](https://docs.google.com/spreadsheets/d/1hsHxKjWFYudXglnEvkugYWK1pfWmldsYZHYQPIvNqbg/edit#gid=770833216). 
+
+Hand edits were required to reorganize information into the appropriate fields, create comma separated lists for complicated results (e.g. lists of URLs, items with commas in quotes, fix spelling, expand abbreviations, standardize capital letters (fewer), and remove spurious text. The resulting sheet is 
+[HERE.](https://docs.google.com/spreadsheets/d/18vq--sjZigHRtyb6gxf0nlhx0YH2NeIiwvDO0LvydHQ/edit#gid=770833216)
+
+The survey results are in *condensed* format.Text for multiple choice answers was replaced with numeric codes, with the translations in yet more Google Sheets: 
+[Codes](https://docs.google.com/spreadsheets/d/1xABpZjt6bgycphtnbMJzMGGGhfcVKk_yn_Kh_iWCcfU/edit#gid=1340486754), 
+[Place Address](https://docs.google.com/spreadsheets/d/1SYDSw4f6EMEZZQ8nKA1k-1AHuixpD54aVQhgPjaogoU/edit#gid=1616508107) and 
+[IYS Themes and Topics](https://docs.google.com/spreadsheets/d/1xABpZjt6bgycphtnbMJzMGGGhfcVKk_yn_Kh_iWCcfU/edit#gid=1340486754).
+
+## Supplementary Data
+Further data, not obtained from the survey, includes 
+[Person Details](https://docs.google.com/spreadsheets/d/1gFSnstwFOZ7wDCyai-fZVGQVpes3aCP4SH0OXqPWATc/edit#gid=55415285), [Person2](https://docs.google.com/spreadsheets/d/1jdmK30Z7vcxVfXJ8I2u4eZ50cbBJnLTPnog4ClF01hE/edit#gid=1417584488), and [PlaceAddress](https://docs.google.com/spreadsheets/d/1SYDSw4f6EMEZZQ8nKA1k-1AHuixpD54aVQhgPjaogoU/edit#gid=1616508107)
+
+There are some futher datasets, including pictures and latitude-longitude for *Place* that will be dealt with separately from this task.
+
+All the data is held in Google Sheets to support collaboration and prevent loss. Sheets have roll-back, so all preceding versions that are automatically saved can be recovered. 
+
+## Authorization to Read Data from Google Sheets
+You must provide the R package *googlesheets* authority to view and manage your Google Sheets. Execute this command: **gs_auth()** in the Rstudio console. Here is the text re *gs_auth* from package *googlesheets*:
+
+>You will be directed to a web browser, asked to sign in to your Google account, and to grant googlesheets permission to operate on your behalf with Google Sheets and Google Drive. By default, these user credentials are cached in a file named .httr-oauth in the current working directory, from where they can be automatically refreshed, as necessary.
+
+Failure to authorize produces this cryptic error message:
+
+>Unable to refresh tokenError in function_list[[k]](value) : Unauthorized (HTTP 401).
+
+I had to remove the file .httr-oauth to make this work on one occasion. Further details here:
+https://github.com/jennybc/googlesheets/blob/master/vignettes/managing-auth-tokens.md
+
+
+
+## Read IYS Codes
+The sheet named *IYS Codes* has two tabs: *IYS Ideas Row* and *IYS Choice Column* which corresponds to the survey questions about opportunities for collaboration by 37 topics IYS across 6 IYS themes  Long and short versions of the IYS themes, topics, and possible choices are provided.
+
+DO NOT FORGET to precede this with **gs_auth()** in the RStudio Consol.
+
+Today I could not make the following code work. BECAUSE I FORGOT **gs_auth()**  
+Further, there were non-ASCII characters which I removed from this Google Sheets (so far as they became visible in .csv).
+>Error in stop_for_content_type(req, expected = "application/atom+xml; charset=UTF-8") : Expected content-type: application/atom+xml; charset=UTF-8 Actual content-type: text/html; charset=UTF-8so 
+
+just downloaded as .csv
+
+```{r gs2, message=TRUE,echo=TRUE, cache=T}
+#ss2 <- gs_key("1xABpZjt6bgycphtnbMJzMGGGhfcVKk_yn_Kh_iWCcfU")
+## IYS Row
+#IYSCodeIdea = gs_read(ss2,verbose=FALSE)  %>% as.data.frame() %T>% 
+#    kable(caption="Topics for Collaboration within IYS Themes");
+## IYS Column 
+#IYSCodeChoice = gs_read(ss2,ws=2,verbose=FALSE) %>% as.data.frame() %T>%
+#    kable(caption="Choices re Collaboration for IYS Topics");
+IYSCodeIdea  <- read.csv("../data/IYS Codes - IYS Ideas Row.csv")
+  cat("\n Topics for Collaboration within IYS Themes \n");
+  print(IYSCodeIdea) 
+IYSCodeChoice<- read.csv("../data/IYS Codes - IYS Choice Column.csv")
+  cat("\n Choices re Collaboration for IYS Topics \n");
+  print(IYSCodeChoice)
+
+```
+
+## Read Edited Survey 
+The Google Sheet is named *Edited Survey 2017 October 29*. There is one one row for each of the 163 persons who responded, but note that some responses were uninformative and the level of detail varied greatly. Columns a to h (1 to 9) indentify the respondent, columns j to az (10 to 52) are the choices re 37 IYS topics, and columns ba:bg, bh:bn, bo:bu (53:59,60:66, 67:73) describe activities.
+```{r gs3, cache=T}
+#https://docs.google.com/spreadsheets/d/18vq--sjZigHRtyb6gxf0nlhx0YH2NeIiwvDO0LvydHQ/edit#gid=770833216
+ss3=gs_key("18vq--sjZigHRtyb6gxf0nlhx0YH2NeIiwvDO0LvydHQ") 
+survey = gs_read(ss3,verbose =FALSE) %>% as.data.frame(); 
+colnames(survey)[c(1:19,52:75)] # 163 by 75 
+# kable(survey[c(54,74,112),c(1:9, 53:75)], caption="Edited Survey, Three Examples"); # Irvine, Holt, Hyatt
+```
+
+## Ancillary Person Data 
+This Google sheet is named *person2* with 367 rows, build from the 351 survey recipients and other DFO salmon people that came to our attention. There will be further *Person* nodes from unpacking lists of people somehow associated with a respondents activities. There is a second tab in this Google sheet, named *Job Code*.
+This sheet resolves ambiguity about job type, regions, and work place. 
+```{r gs4, cache=TRUE}
+#https://docs.google.com/spreadsheets/d/1jdmK30Z7vcxVfXJ8I2u4eZ50cbBJnLTPnog4ClF01hE/edit#gid=1417584488
+ss4 <- gs_key("1jdmK30Z7vcxVfXJ8I2u4eZ50cbBJnLTPnog4ClF01hE");
+person <- gs_read(ss4, colnames=TRUE,verbose=FALSE) %>% as.data.frame();
+colnames(person)
+SampleRows(person[1:5,], "Sample of person");
+jobCode= gs_read(ss4,ws=2, colnames=TRUE,verbose=FALSE) %>% as.data.frame();
+cat(" \n Job Codes \n"); print(jobCode)
+```
+
+## Merge Person Details with Survey  
+Survey recipients (a data set requested from Survey Monkey) provided name, email, and response (complete,partial,no) for 351 recipients, indicating 163 responses.  A separate list of 367 DFO salmon staff was compiled with name, email, region, and job type (7 categories). These lists were merged. Misspelt names were discovered and corrected in the longer staff list.  
+> person is 367 by 9. emails are all in caps, unlike recipient. 
+> recipient is 351 by 3.
+
+```{r mergePersonSurvey}
+surveyName=with(survey, paste(firstName,lastName)) # separate by one space
+# any duplicate names? 
+x=sort(surveyName);    sum(x[-length(x)] == x[-1])  # 0
+x=sort(person$name);  sum(x[-length(x)] == x[-1])  # 0
+# any survey names not in person?
+sum(!(surveyName %in% person$name)) # 0 
+survey$name=surveyName
+survey1 <- merge(x=person, y=survey, by="name",all=TRUE) # 367, all data from both retained.
+# do names match?
+SampleRows(survey1[1:40,c("name","firstName","lastName","response")],"Do Names Match?" ) # 10
+# do emails match, apart from capitals (email not case sensitive)
+j= (survey1$email.x != survey1$email.y) & (!is.na(survey1$email.y) )
+survey1[j, c("email.x","email.y")]
+# from this identified rows 122, 261, 308, and 316 as wrong in email.x.
+survey1$email.x[c(122,261, 308, 316)] <- survey1$email.y[c(122,261,308,316)]
+survey1$email.y <- NULL # remove superfluous column
+    # region or job type missing?
+    # x=survey1[ (is.na(survey1$region) | is.na(survey1$jobCode)), ] 
+    # if(nrow(x) != 0){cat(x[1:max(nrow(x),10)])} else {cat("\n No job or region missing.\n")} 
+    # rm(x)
+# missing jobTitle despite having jobDescrition
+    # sum(is.na(survey1[,"jobCode"]))  # 0
+j0 <- is.na(survey1[,"jobTitle"]); # sum(j0) # 302
+for(j in which(j0)){
+    k <- grep(survey1[j,"jobCode"],jobCode$code) # person has which job? e.g. "MA" is 3
+    survey1[j,"jobTitle"] <-  jobCode[k,2] # e.g. "Resource Manager"
+}
+```
+
+The survey data with 163 names was merged with ancilliary data for 351 names. The comparison of emails identifed errors in person (email.x) for four people. These were replaced the email from the survey (email.y, which we know worked). 
+Region and Job Type were factors for the analysis of IYS topics.
+
+### IYS Choices
+Extract the columns with the responses to the IYS topics, maintaining the order of Person responding. Save this as "iys."
+```{r iysChoice}
+x <- colnames(survey1) # find IYS1.1 etc but not IYS1.99 which is "other"
+topic.col <- which( (substr(x,1,3) == "IYS") & (substr(x,6,7) != "99") ) # 37
+cat("The topic columns in survey1: ", topic.col,"\n")
+# 19 20 21 22 23 24 25 26 27 29 30 31 32 33 35 36 37 38 39 40 41 43 44 45 46 47 48 49 51 52 53 54 56 57 58 59 60
+iys <- survey1[ , topic.col] # 367 by 37 with about 124 not repondents.
+```
+### IYS Response Rate
+```{r responseIYS}
+# count responses by 367 persons
+a <- apply (iys, 1, function(x) sum(!is.na(x))) # 367
+cat("count responses with any IYS choices:", sum(a>0), "\n")
+cat("count responses with all 37 IYS choices:", sum(a==37), "\n")
+cat("count responses with > 10 & < 37 IYS choices:", sum( (a>10) & (a<37)) , "\n")
+```
+
+### IYS Level of Interest
+What is the useful "level of interest" to warrant linking a Person to an Idea that is an IYS topic? Missing or "1. no" is obvious. So are:  
+3. Yes, I have an activity that would benefit from additional collaboration  
+4. Yes, I am keen to  share data, skills, and/or knowledge with other. (?)  
+5. Yes, this collaboration is vital to my work and should be a high priority for DFO.
+
+In what follows, I look at including versus excluding "2. Yes, but unlikely at present."
+
+```{r interestIYS}
+a <- iys # 367 by 37 
+a[is.na(a) | a ==1 ] <- 0 # missing or 1:"no" 
+a1 <- (a > 1)  # TRUE if interested
+cat(sum(a1), "cases of person has interest level 2 to 5 \n")
+a1s <- apply(a1,1,sum) # 367
+j= a1s > 0; cat(sum(j), "involving persons \n") # 127
+cat(sum(a1s == 37)," respondents indicated all 37 topics  > 1 \n") # 22
+cat(sum(a1s >20)," respondents indicated more than 20 topics  > 1 \n") # 96
+hist(a1s[j] , breaks=1:37, col="wheat",
+     xlab="Number of Topics Indicated", main="Choice 2:5");box();
+cat("\n")
+# only high interest in a topic, choice was 3, 4, or 5.
+a1 <- (a > 2)  # TRUE if interested
+cat("\n")
+cat(sum(a1), "cases of person has interest level 3 to 5\n")
+a1s <- apply(a1,1,sum) # 367
+j= a1s > 0; cat(sum(j), "involving persons \n") # 121
+cat(sum(a1s == 37)," respondents indicated all 37 topics  > 2 \n") # 7
+cat(sum(a1s > 20)," respondents indicated more than 20 topics  > 2 \n") # 55
+hist(a1s[j] , breaks=1:37, col="wheat",
+     xlab="Number of Topics Indicated", main="Choice 3:5");box();
+rm(a1, a1s) # clean up
+```
+
+Based on the preceding, IF "2. pending" is included THEN an excessive number of Ideas per person are created. 96 people would have more than 20 of 37 ideas and 22 people would have 37/37. That would create difficulty to discriminate small groups or pairs of people, thus opportunities for collaboration. The problem persists after excluding "2. pending" but is less severe: 55 with > 20 interests, 7 with all 37.
+
+I excluded "2. pending" from adding links to Idea where Idea is an IYS topic.  Further, I kept these expressions of interest as logicals (T or F) in the data.frame iys (367 by 37) and did not change survey1.
+
+```{r IYS.interest}
+iys[is.na(iys) | iys ==1 ] <- 0 # missing or 1:"no" 
+iys <- (a > 2)  # TRUE if interested. iys is type logical.
+numPhIYS <- sum(iys) # 2,299  This is used later.
+cat(numPhIYS ,"cases of Person-has-Interest in IYS topic. \n"); 
+```
+
+## Extract Names for IYS Theme and Topic  
+Lists of theme and topic names, and a factor *fctr* that relates the 37 topics to the 6 themes. Topics and themes will be *IdeaTags*, with topics nested within themes, that link people to other people. 
+
+
+```{r extract}
+j0 <- IYSCodeIdea$IYS_Row == 0  # theme
+theme <- IYSCodeIdea[j0,"IYS_Short_Text"] %T>% kable(caption="Theme");
+theme.long <- IYSCodeIdea[j0,3]
+theme.short <- substring(theme,7)  # drop "IYS.1 "
+j1 <- !(j0 | IYSCodeIdea$IYS_Row == 99) # topic 
+topic <- IYSCodeIdea[j1,"IYS_Short_Text"] %T>% kable(caption="Topic"); # not theme
+topic.short <- substring(topic,9)  # drop "IYS1.1. "  # idea
+topic.long <- paste0(substr(topic,1,8), IYSCodeIdea[j1,3]) # description
+fctr <- IYSCodeIdea[j1,"IYS_Theme"]; # fctr, 37
+```
+
+# Create Tables
+Now we begin to produce tables that will be used for Neo4j via Cypher
+Some as vectors of string that are Cypher statements. Others via  
+> LOAD CSV WITH HEADERS FROM 'file:///with-headers.csv' AS line 
+
+## Person, IdeaTag, Person Has IdeaTag
+The survey data has cells that are lists of attributes for a Person, edited by hand to QCSV. Note that _webPage_ can be a comma-separated list, such as:  
+> "http://www.pac.dfo-mpo.gc.ca/sep-pmvs/index-eng.html, https://www.psf.ca/what-we-do/community-salmon-program, http://dfo-mpo.gc.ca/oceans/crf-frc/index-eng.html, http://www.dfo-mpo.gc.ca/pnw-ppe/rfcpp-ppcpr/index-eng.html,  http://fwcp.ca/"
+
+So a **Person** can have multiple of **WebPage**, and a **webPage** can be associated with more than one **Person**. That means nodes must be created independently of links, so that there can be one-to-many and many-to-one.
+
+```{r ideaTag}
+Person <- data.frame(Person.name = survey1$name,
+                     Person.firstName = survey1$firstName,
+                     Person.lastName = survey1$lastName); # 367
+IdeaTag <- data.frame(IdeaTag.name = topic.short, 
+                      IdeaTag.description = topic.long); # 37
+IdeaTag1<- data.frame(IdeaTag.name = theme,
+                      IdeaTag.description =theme.long);
+IdeaTag <- rbind(IdeaTag, IdeaTag1); rm(IdeaTag1);
+IdeaTagHasIdeaTag <- data.frame(fromIdeaTag.name = topic.short, 
+                     toIdeaTag.name = theme[fctr]);
+PersonHasIdeaTag <- data.frame(Person.name = rep("asdf",numPhIYS),
+                    IdeaTag.name = NA); # row count known.
+jPHI <- 0; 
+for (j in 1:dim(iys)[1]){                    # 367
+    for (k in 1:dim(iys)[2]){                # 37
+        if(iys[j,k]){                        # T or F
+            jPHI <- jPHI+1;                  # increment index 
+            PersonHasIdeaTag[jPHI,] <- c(survey1$name[j], topic.short[k])
+        }  # end if interested
+    }  # end IYS topic
+}  # end Person
+```
+
+This created 366 Person and `r jPHI` of PersonHasIdeaTag, Assuming "Conley Kevin" was deleted.
+
+## Person Has Org, Org Has Org.
+The organization data from the survey is a mess. DFO reorganizes freguently so organization data quickly becomes obsolete. Data for *branchDirectorateSector* is ideally as list that reflects a hierarchy, e.g. 'Science Branch,"Aquatic Resources, Research, and Assessment Division", Quantitative Assessment Methods Section'. Few persons provided this accurately. Where *branchDirectorateSector* was entirely missing, *region* was substituted, i.e. linked at a higher level than desirable in the Org hierarchy.
+
+The table **OrgHasOrg** connects *branchDirectorateSector* (when provided) to *region* and also connects *region* to DFO. This will need further work to dissect, correct, and recreate as the proper hierarchy. See the table BranchSector in Google Sheet: People SalmonNet 2017 September26.
+
+The table **PersonHasOrg** was created from from *branchDirectorateSector* and the link **hasOrg** contains properties jobType (e.g. "Research Scientist"), *jobTitle* and *jobDescription*.  Typically *jobTitle* was missing and jobCode was substituted, e.g. *jobCode*="MA" provided *jobTitle* = "Resource Manager" where *jobTitle* was missing.
+
+
+```{r PO}
+PersonHasOrg <- data.frame(
+    Person.name = survey1$name,
+    Org.name=survey1$branchDirectorateSector,
+    hasOrg.jobTitle = survey1$jobTitle,
+    hasOrg.jobDescription = survey1$jobDescription );
+j=is.na(survey1$branchDirectorateSector) # patch
+PersonHasOrg$Org.name[j] <- survey1$region[j]  # skip a level in org hierarchy
+
+OrgHasOrg <- data.frame(
+    fromOrg.name=survey1$branchDirectorateSector[!j],  # if attempted
+    toOrg.name=survey1$region[!j]);
+oho <- data.frame(
+    fromOrg.name=unique(survey1$region),  # 6
+    toOrg.name="DFO");
+OrgHasOrg <- rbind(OrgHasOrg,oho); rm(oho) # a mess but a start
+SampleRows(OrgHasOrg,"Sample of OrgHasOrg");
+```
+
+There were `r sum(j)` missing *branchDirectorateSector* and patched with *region* so Person is connected to Org hierarchy somehow, but at a higher level than desired.
+
+## Proffered Collaboration Topics by IYS Theme  
+The survey asked respondents to proffer more collaboration topics for each theme. These were edited to be comma-separated phrases useful as IdeaTags. Phrases with commas were put into quotes. The resulting **PersonHasIdeaTagB** with *Person, IdeaTag.name,* and *IdeaTag.description* will subsequently be added to the table **PersonHasIdeaTag**.
+
+
+```{r proffered}
+x <- colnames(survey1) 
+# find IYS1.99, IYS 2.99,.  
+proff.col <- which( (substr(x,1,3) == "IYS") & (substr(x,6,7) == "99") )
+    # 6 columns: 27 33 41 49 54 60
+proff = data.frame(Person.name=NA, IdeaTag.name=NA, IdeaTag.description=NA) ; # result
+proff.count <- 0L  # integer
+for (k in proff.col){
+    proffered <- which(!is.na(survey1[,k])) # which rows, if any?
+    if (length(proffered) == 0) next; # note: which(FALSE) gives integer(0) with length 0
+    for(j in proffered){   # for Person
+       a <- UnpackQ1(survey1[j,k]); # cat(a,"\n")
+        for(i in 1:length(a)){ 
+            proff.count %<>%I  # increment, I() in chunk "local""
+            proff[proff.count,1:2] <- c(survey1$name[j],a[i]) # Person, IdeaTag
+            #cat(proff.count,a[i],"\n")
+        }
+    }
+}
+for(j in 1:dim(proff)[1]){
+    if(grepl(":$",proff$IdeaTag.name[j])){  # trailing colon means a description follows
+        proff$IdeaTag.name[j] <- substr(proff$IdeaTag.name[j],1,nchar(proff$IdeaTag.name[j])-1)
+        proff$IdeaTag.description[j] <- proff$IdeaTag.name[j+1];
+        proff$IdeaTag.name[j+1] <- "TBD"
+    }
+}
+proff <- proff[proff$IdeaTag.name !="TBD",] # remove names moved to description
+SampleRows(proff,"Proffered Topics from IYS themes") # 10
+PersonHasIdeaTagB <- proff
+```
+
+There were `r proff.count` proferred topics for collaboration, additions to the 37 topics in the survey re IYS themes. Some were a single keyword or phrase, others comma-separated words and/or phases, yet others a lengthy phrase that contained commas. Only a few are synonymous or repeats. 
+
+## Place has Address
+The survey data has common locations as a code or less common *Place* as text (cleaned by hand). Here we substitute a place name for a code. Place is simplified to be one field (column) in the survey. The code for place, the place name, the address, and the DFO region are in the Google Sheet mentioned above.
+```{r gs6}
+ss6  = gs_key("1SYDSw4f6EMEZZQ8nKA1k-1AHuixpD54aVQhgPjaogoU") 
+PlaceHasAddress = gs_read(ss6, colnames=TRUE,verbose=FALSE) %>% as.data.frame(); 
+SampleRows(PlaceHasAddress,"Place has Address")
+```
+
+## Place Instead of Code
+The Google Sheet *placeAddress* has the data to replace codes for *Place* obtained by the survey. Each *Place* will subsequently be linked to an *Address* node. First the codes 1:22 are replaced by place names. Then code 0 is replaced by *locationOther* from the survey. *locationOther* is a comma separated list in a field in the survey result (after editing by hand), with place name as the first item.
+The order of *survey1* is maintained.
+```{r re-place}
+code <-survey1[,"locationCode"] # most are NA, 7 from survey results were NA
+code[is.na(code)] <- 0 # likely to be "" later
+decode <- PlaceHasAddress[PlaceHasAddress$code > 0,] # codes used in survey
+decode <- decode[order(decode$code),]          # sort for look-up
+code[code > 0] <- decode[code[code > 0],2]     # look-up and replace locationCode in survey
+other <- survey1[,"locationOther"]              # csv list of place name, address,,
+other <- strsplit(other,",") # edited survey has lists of 5. 126/163 are NA
+for(j in 1:length(code)) if(code[j] == "0") code[j] <- other[[j]][1] ; # other placeNname
+# use code to replace some of the NA in survey1$place
+j<- is.na(survey1$place) & (!is.na(code)) 
+survey1$place[j] <- code[j]
+# display a sample
+j <- dim(survey1)[1] %>% sample(10) %>% sort
+cbind(j,survey1$name[j],survey1$place[j]) %T>%
+    kable(col.names=c("Row","Name","Place"))
+j <- !is.na(survey1$place)
+PersonHasPlace <- data.frame(Person = survey1$name[j], Place= survey1$place[j])
+rm(code,decode,other)
+```
+
+37 *locationOther* were used, 97 missing place substituted. Leaves 6 survey people whose response was "Partial" or "Complete" and for whom *Place* is NA.
+
+### Ensure Place is Consistent
+compare place in survey to place in PlaceAddress. Fixed by hand. 7 remain as NA.
+```{r checkPlace, eval=FALSE}
+#j = survey1$place %in% PlaceHasAddress$place # match T or F
+#kable(survey1[!j,c("locationOther","place") ], caption="Inconsistent Place Name")
+```
+
+## Lists Within Cells 
+These are dealt with one Person at a time, unpacked by loops in R, and saved as data.frames that will be, subsequently, easily loaded in to the SalmoSphere Knowledge Graph as neo4j nodes and links. The survey was edited by hand to avoid duplicate activities and to structure lists of lists correctlyk e.g. reorganizing addresses as CSV data with province, postal code,, as ordered fields (not named fields). All of the links specified or implicit in the survey must be maintained in these intermediate data.frames. 
+
+Some survey data are lists of list, edited by hand to QCSV. Some of the survey data are lists. for example *webPage* can be a comma-separated list:
+
+>http://www.pac.dfo-mpo.gc.ca/sep-pmvs/index-eng.html, https://www.psf.ca/what-we-do/community-salmon-program, http://dfo-mpo.gc.ca/oceans/crf-frc/index-eng.html, http://www.dfo-mpo.gc.ca/pnw-ppe/rfcpp-ppcpr/index-eng.html,  http://fwcp.ca/
+
+
+
+## Activity,Various 
+Create these tables: Activity, PersonHasActivity, ActivityHasPerson, ActivityHasLocation, IdeaTagA, ActivityHasIdeaTag, ActivityHasWebPage.
+
+The survey data for **Activity** is a hierarchy of lists starting with the respondent **Person** for each person, for example:  
+`r colnames(survey1)[61:81]`.  
+
+> "activity1Title" "activity1Description" "activity1YourRole" "activity1WebLink"
+ "activity1Location" "activity1KeyPeople" "activity1Keywords"
+ 
+One Person can have zero to three of **Activity**: *activity1, activity2, activity3* where each Activity has a list of attributes: *Title, Description, YourRole,	WebLink, Location, KeyPeople, Keywords* and the last four of those attributes are lists. For example, the spreadsheet column named *Activity1KeyPeople* is, after hand editing, a list (by person) of QCSV lists:  
+>"Wilf Luedke, Area Chief Stock Assessment, DFO, wilf.luedke@dfo-mpo.gc.ca",  
+"Diana Dobson, Stock Assessment Biologist, DFO, Diana.dobson@dfo-mpo.gc.ca",  
+"Tawney Lem, Executive Director, West Coast Aquatic Management Association, tawney@westcoastaquatic.ca",  
+"Mike Austin, Conuma Hatchery Manager, DFO, mike.austin@dfo-mpo.gc.ca" 
+
+No attempt has (yet) been made to reconcile names in key people with **Person** names from the 351 survey recipients, but there is a large overlap.
+
+The lists of lists within a spreadsheet cell are inconsistent. To deal with this, my local function *UnpackQ2* produces NA (empty cell) or a list with 1 or more vectors of 1 or more strings. That is picked apart to generate tables of **PersonHasActivity** (with link description *role*; from respondents so name is recognized), **ActivityHasLocation, ActivityHasPerson** (from KeyPeople so name is not recognized), **ActivityHasIdeaTag**, and **ActivityHasWebPage**. **Activity** is stored with two attribututes *title, description*.
+
+**PersonHasActivity** is separated at this stage from **ActivityHasPerson** until each name in KeyPeople is resolved, by hand in a Google Sheet, as either a known recipients (existing **Person**), a new **Person**, a known Org, a new Org, or not useful.
+
+The field KeyWord from the edited survey data was extracted as a table **ActivityHasIdeaTag** with one or more rows for each **Activity**. This was maintained separately from **PersonHasIdeaTag**, an arguable decision, but accessible by a pattern such as:  
+>(:Person) -[:hasActivity]-> (:Activity) -[:hasIdea]-> (Idea)  
+
+There are new and un-resolved **Place** names in the **Activity** locations. These new locations were resolved by hand in a Google Sheet, similarly to new data for **Person**. 
+The new **Person** are simple CSV lists of 'name,name' or QCSV lists of lists: '"name,role,org,region,email","name,role,org,region,email"'
+
+### Setup
+Activity is dissected into tables of nodes and links in two steps. One sets up table names, etc. The second loops through acitivity data from the survey, upacks spreadsheet cells with lists and lists of lists, and produces the table.
+
+```{r SetUp, echo=TRUE}
+n = sum(!is.na(survey1[,c("activity1Title","activity2Title","activity3Title")])); # 90
+cat('Found',n,'activities.\n');
+Activity <- data.frame(Activity.name="NA",Activity.description="NA")
+IdeaTagA <- data.frame(name="NA",description="NA") # don't lose preceding
+PersonHasActivity   <- data.frame(  Person.name="NA",role="NA",Activity.name="NA")
+ActivityHasLocation <- data.frame(Activity.name="NA",Location.name="NA")
+ActivityHasPerson   <- data.frame(Activity.name="NA",Person.name="NA");
+ActivityHasIdeaTag  <- data.frame(Activity.name="NA",IdeaTag.name="NA");
+ActivityHasWebPage  <- data.frame(Activity.name="NA",WebPage.name="NA");
+act <- c("activity1","activity2","activity3");  # which activity
+atr <- c("Title","Description","YourRole","WebLink","Location","KeyPeople","KeyWords"); # which attribute within an activity
+TBD <- "GQDARREIBG";#~unique,paste0(sample(LETTERS,10,T),collapse="")
+```
+
+### Extract Activity Data
+```{r extrAct, echo=TRUE}
+jI <- jA <- jAL <- jAP <- jAI <- jAW <- 0L; # counters for lists
+for(k in 1:3) {                       # Activity
+  cell <- paste0(act[k],atr)        # 7 fields each Activity
+  hasAct= which(!is.na(survey1[,cell[1]]))     # empty?
+  for(j in hasAct){                # Person Has Activity      
+    who <-  survey1[j,"name"] 
+    title <-survey1[j,cell[1]]
+    desc <- survey1[j,cell[2]] 
+    role <- survey1[j,cell[3]]
+    web <-  survey1[j,cell[4]] %>% UnpackQ1  
+# web is NA, or list with 1 or more QCSV
+    loc <-  survey1[j,cell[5]] %>% UnpackQ1
+    key <-  survey1[j,cell[6]] %>% UnpackQ1  
+# key should be UnpackQ2 but deferred
+    tag <-  survey1[j,cell[7]] %>% UnpackQ1  # a vector
+# Activity has IdeaTag.  description follows if name ends with :
+    if(!is.na(tag[1])){
+      for(i in 1:length(tag)){
+        if(tag[i] == TBD) next; # skip, description not name
+        jI%<>%I; IdeaTagA[jI,1] <- tag[i];
+        jAI%<>%I;ActivityHasIdeaTag[jAI,]<-c(title,tag[i]);
+        if(!grepl(":$",tag[i])) next; # ends with colon?
+        # deal with description
+        a <- substr(tag[i],1,nchar(tag[i])-1); # delete colon
+        IdeaTagA[jI,] <- c(a, tag[i+1]) # name and description
+        ActivityHasIdeaTag[jAI,2] <- a;  # fixed name
+        tag[i+1] <- TBD    # skip description next iteration
+      }
+    }  # end if
+# Person Has Activity        
+    jA%<>%I; Activity[jA,] <- c(title,desc); 
+    PersonHasActivity[jA,] <- c(who,role,title); 
+# Activity has Location, has WebPage
+    if(!is.na(loc[1])){
+      for(i in 1:length(loc)){
+        jAL%<>%I; ActivityHasLocation[jAL,]<-c(title,loc[i]);
+      }
+    }
+    if(!is.na(web[1])){
+      for(i in 1:length(web)){
+         jAW%<>%I; ActivityHasWebPage[jAW,] <-c(title,web[i]);
+      }
+    }
+# Activity has Person
+    if(!is.na(key[1])){
+      for(i in 1:length(key)){
+        #cat(k,j,i,key[i],"\n",file="debugKey.txt",append=T); # to file
+        jAP%<>%I;
+        if(grepl(",",key[i])){  # is there a comma?
+          # was QCSV string, "name,role,org,," now no quotes 
+          a <- key[i] %>% strsplit(",") %>% `[[`(1) %>% `[`(1);  # name
+          ActivityHasPerson[jAP,] <- c(title,a);
+        } else { 
+          ActivityHasPerson[jAP,]  <-c(title,key[i]);  # simple name
+        }
+      }# i
+    }# if
+  }# j
+}# k
+```
+
+```{r}
+PersonHasContactService <- survey1[,c("name","email.x","telephone")];
+names(PersonHasContactService) <- c("Person.name","emailWork","phoneWork")
+# split name into first and last
+js <- which(is.na(Person$Person.firstName))
+for (j in js)  Person[j,2:3] <- Person$Person.name[j] %>% 
+    trimws %>% strsplit(' ',fixed=T) %>% unlist; 
+```
+
+## Place 
+You might thing we should eliminate Person-has-Place in favour of Person-has-Activity-has-Place, but typically it is easy to discover where people work and hard to know what they do.
+```{r Place}
+Place <- data.frame(name = PlaceHasAddress$place, description = NA, latLong = PlaceHasAddress$latLong);
+names(PersonHasPlace) <-c("Person.name", "Place.name")
+```
+
+## Place has WebPage
+j = which(!is.na(PlaceHasAddress$photo)) # find photo URLs
+a <- data.frame(name=PlaceHasAddress.name[j],type="image",URL=PlaceHasAddress$photo[j]) 
+j = which(!is.na(PlaceHasAddress$webPage));  # find description URLs
+b <- data.frame(Place.name[j], type="about", URL=PlaceHasAddress$webPage[j]);
+PlaceHasWebPage <-cbind (a,b) ;  # make one table from two.
+Address <- data.frame(uid=PlaceHasAddress[,3:7]) 
+PlaceHasAddress <- c(Place.name,Address.poBox)
+
+
+# Write CSV Files
+The preceding tables are exported in .csv format for input to the next stage. This format provides the ability for hand editing if required.
+
+```{r write.csv}
+a=c("Activity", "Person","IdeaTag","IdeaTagA", "ActivityHasIdeaTag", "ActivityHasLocation", "ActivityHasPerson", "ActivityHasWebPage", "OrgHasOrg", "PersonHasContactService", "PersonHasActivity", "PersonHasIdeaTag", "PersonHasIdeaTagB", "PersonHasOrg", "PersonHasPlace", "PlaceHasAddress");
+for(j in 2:length(a)){
+    file=paste0("../output/",a[j],".csv");
+    cat(file,"\n")
+    write.csv(get(a[j]), file=file, row.names=FALSE);
+}
+```
+
+```{r toJSON}
+# save(survey1, file="../data/survey1.Rdata")
+
+```
+*finis*
+

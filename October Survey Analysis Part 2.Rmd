@@ -1,0 +1,204 @@
+---
+title: "October Survey Analysis Part 2"
+author: "Scott Akenhead"
+date: '2017-12-20'
+output:
+  html_document:
+    toc: TRUE
+    toc_depth: 2
+    number_section: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(results="hold", comment="")
+options(digits=5,show.error.locations=T,stringsAsFactors=F,show.signif.stars=F)
+library(ggplot2); library(magrittr);library(googlesheets);library(openssl);
+```
+
+```{r localFunctions,include=FALSE}
+dirIn ="/Users/Scott/Documents/Projects/DFO_Salmon_Net/Data_from_R/" # read from
+dirOut="/Users/Scott/Documents/Projects/DFO_Salmon_Net/Data_from_R/" # write to
+
+#source('~/Documents/R_main/rScott/R/Simple.R')
+
+SetPar=function() par(   # a function with one statement
+    oma = c(2,2,1,1),    # room for marginal titles
+    mar = c(3,3,1,0),    # spacing between plots
+    mgp = c(1.5,0.5,0),  # axis numbers close to axis
+    tcl = 0.2,           # ticks inside
+    xaxs = "i",          # 0 at origin. begs xlim=c(0,1.1*max(x))
+    yaxs = "i",          # 0 at origin. begs ylim=c(0,1.1*max(y))
+    pch=20               # small points
+); 
+
+axis34=function(){axis(3,label=F);axis(4,label=F);} # just ticks, top and right
+
+R2=function(a){          # when line through origin, lm gives wrong r^2
+    y=a$model$y;ym=mean(y);
+    r2=1-sum(a$residuals^2)/sum((y-ym)^2);
+    round(100*r2,2) # as percent to two decimals (1/10,000)
+}
+
+macro=function(tx) eval(parse(text=tx))
+
+Margins=function(a,fnc=sum,...){    # adds right-hand col and bottom row
+    a=cbind(a,apply(a,1,fnc,...));  # as in apply(a,1,mean, na.rm=T)
+    a=rbind(a,apply(a,2,fnc,...)); return(a);
+}
+
+```
+
+image: ![SalmoSphere](\users\Scott\Documents\Pictures\salmon splash sky small.jpg)
+
+# Data
+```{r googleSheets}
+print("Place Address") 
+# https://docs.google.com/spreadsheets/d/1SYDSw4f6EMEZZQ8nKA1k-1AHuixpD54aVQhgPjaogoU
+ss1=gs_key("1SYDSw4f6EMEZZQ8nKA1k-1AHuixpD54aVQhgPjaogoU");
+placeAddress = gs_read(ss1,colnames=TRUE) %>% as.data.frame() 
+print(placeAddress[43:46,]); # 61 by 11
+
+#print("People SalmonNet 2017 September26  --- recipient");
+#ss5  = gs_key("1gFSnstwFOZ7wDCyai-fZVGQVpes3aCP4SH0OXqPWATc")
+#person = gs_read(ss5,colnames=TRUE) %>% as.data.frame(); #print(person[seq(1,350,35), ]);    
+#recipient = gs_read(ss5,colnames=TRUE, ws=2) %>% as.data.frame(); #print(recipient[seq(1,5), ]);
+#print("People SalmonNet 2017 September26  --- branchSector");
+#branchSector = gs_read(ss5,colnames=TRUE, ws=3) %>% as.data.frame() %T>% print;
+```
+
+# Locations
+
+We investigated how choices re IYS Topics differed by DFO Regions and by job classification. Matching Person to Region was done from the survey question *Location* and from finding people in DFO's internal Outlook.
+
+### Assign survey Place to DFO Region
+The 23 choices for place in the survey include 0 for"other". The remaining 22 places are assigned to regions.
+```{r placeHasRegion}
+placeRegion=c(1,1,1,5,2,3,3,3,3,4,7,6,6,6,6,6,6,6,6,6,6,6); 
+# length(placeRegion)
+locationCode$region= c("other",regionCode[placeRegion,2])
+```
+
+## Expand Location (Address)
+
+Location has 5 fields that constitute an Address:  poBox, address, city, province, postalCode.  About 1/3 of responses had "other" locations with code 0 or missing (*NA*).  Location and Address are different Resource types, a Place has an Address. The database will have  `(:Person) -[hasPlace]->(:Place)` and  `(:Place) -[hasAddress]->(:Address)` but will not have the redundant `(:Person) -[hasAddress]->(:Address)`.
+
+First a table of response frequency by place, before "other" locations are explicit. No survey responders chose place as Bayfield Institute (code 1) or 
+Sea Lamprey Control Centre (code 3); these were inserted as frequency = 0. 
+
+```{r scs} 
+#survey2 = data.frame();
+survey2=data.frame(name=paste(survey$firstName, survey$lastName))  # corresponds to person1
+# three categories of locations code: NA, 1:22, 0 (other)
+freq = survey$locationCode %>% as.numeric %>% table %T>% print;
+loc=attributes(freq)$dimnames$. %>% as.numeric # these are the codes, 0 to 22
+attributes(freq) <- NULL
+locFreq = data.frame(loc, freq);
+locFreq %<>% rbind(., data.frame(loc=c(1,3),freq=c(0,0))) %>% .[order(.[,2],decreasing=T),] # add place chosen by zero responders, sort
+locFreq$place = locFreq$loc %>% match(.,locationCode$code) %>% 
+    locationCode[.,2] %T>% print; 
+j=order(locFreq$freq,decreasing =TRUE)
+```
+```{r plt.place.freq, fig.width= 5, fig.cap="Figure 1. Frequency of Place"}
+SetPar(); par(mai=c(3.,1,1,0.5),xaxs="r");
+y=locFreq$freq[j];
+plot(1:23, y, type="h",lwd=3, xaxt="n", ylim=c(0,40), # ylim=c(0,1.1*max(y)),
+     xlab="", ylab="Responses") 
+  axis(1,at=1:23, labels=locFreq$place,las=3, cex.axis=0.75)
+  axis(4,labels=F)
+
+```
+
+Disassemble the survey field *locationOther* into place and address. To facilitate this the survey data was edited to make this field a quoted .csv list. Entries for *locationOther* must be blank unless *locationCode* is 0; this was fixed by edits. Leading and trailing blanks were removed, including the blank in postal code.
+
+```{r sep.plc.addrs}
+pa=survey$locationOther %>% strsplit(., ",", fixed=T)  # keep blanks to preserve alignment
+place=character(length(pa))                            # hold result  
+n=sum(survey$locationCode =="0",na.rm=T)               # how many "other"?
+newPlaceAddress=data.frame(place=character(n), address=character(n), city=character(n), province=character(n),postalCode=character(n));
+# same format as locationCode from survey
+k=0
+for(j in 1:length(pa)){
+    place[j]=pa[j][[1]] # for Person when locationCode = 0
+    if(is.na(place[j])) next;
+    k=k+1
+     newPlaceAddress[k,] = pa[[j]]  # trimws ?
+}
+tmp=newPlaceAddress; for(j in 1:5) tmp[,j]=trimws(newPlaceAddress[,j]);
+tmp[,5] %<>% sub(" ","",.) # remove blank in postalCode
+newPlaceAddress = tmp %T>% print
+df= paste0(dirOut,"placeHasAddress.csv")
+rbind(locationCode[2:23, c(2,4:7)], newPlaceAddress) %>% write.csv(.,df)
+```
+Compare these place names with the a separate, longer list previously read from a Google Sheet,*placeAddress.
+```{r}
+j= newPlaceAddress$place %in% placeAddress$place; 
+sum(j,na.rm=T); length(newPlaceAddress$place)
+```
+
+Then replace the locations in the survey data with explicit place names. 
+
+```{r rel.loc}
+place = character(length(survey$locationCode)) # hold decoded locations
+j = survey$locationCode == 0 ; 
+place(j)= survey$locationOther[j]
+k= is.na(survey$locationCode); place(k)= NA
+place[!(j|k] = locationCode[survey$locationCode,"place")]
+
+``` 
+
+From the surveys returned, `r sum(j)` locations were *other*, `r sum(k)` locations were *NA*, and `r length(place)-sum(j|k)` selected one of the 22 coded locations. 
+
+## Parsing and Generalizing Ideas
+
+The main objective of the survey was to identify potential collaborators by the similarity of interests and activities. We tagged *things* like Person, Place, Document, Activity, and WorkGroup by *ideas* that are essentially words and phrases extracted from the text provided in survey responses. We extended these specific ideas, such as *Bayesian stock-recruit analysis*, to general ideas, in this case *model* and *statistics*. The objective is to link people by specific ideas and by a chain of ideas involving generalizations. Thus two people, x and y,  can be connected as  
+(x:Person) -[hasIdea]-> [a:Idea] {type:”specific”)  <-[hasIdea]- (y:Person)  
+with only two links. Obviously this is a close association and if there are several it would be surprising if these people were unaware of each other if not already working together. 
+
+People can be linked by general ideas as well as the specific ideas they identified, such as  
+(x:Person) -[hasIdea]-> (a:Idea{type:”specific”) -[hasIdea]-> (a:Idea {type:”general”) <-[hasIdea]- (a:Idea {type:”specific”)  <-[hasIdea]- (y:Person)  
+with four links. Linking *things* by a chain of *ideas* is more powerful way to find connections than using conventional tags (keywords). For instance, ‘Chinook’ and ‘kings’ could be linked via ‘Pacific Salmon’ or by *Oncorhynchus tshawytscha*. A computer can discover such chains of connections. The links are two-way, so two people may be connected though a third person. This applies to Activity, Document, WorkGroup, etc. 
+
+The result is that two people who completed the survey are likely to have multiple chains of ideas that connect them. Long chains represent connections likely to be tenuous and useless; a connection via two links is closer than one via four links and a connection via six links may not be useful. Nevertheless, discovering that two people are connected by many weak chains suggests an unrevealed idea provides a close link. For instance, someone working on intertidal vegetation on a shoreline in Nova Scotia may be connected to someone counting dead sockeye spawners in a river in British Columbia, via connections like’survey’, ‘GIS’, ‘new technology’ , etc., the discovery of which might reveal, in a subsequent conversation, that they are both interested in video surveys via pre-programmed drones. Stretching this hypothetical situation, we might guess they did not mention drones because they were daunted by technological, logistic, bureaucratic, and financial barriers, but this is precisely where a new WorkGroup would be valuable by gathering collaborators who had seemed disparate previously.
+
+# Loading The Knowledge Graph 
+Accomplished via queries in the Cypher language (similar to SQL) built as strings in R and applied to the neo4j database via package *rneo4j*.
+
+### Resource Node Types
+Information is organized by standardized RoundTable definitions for nodes and link.
+|**Core**| |                                                                      |
+|:------:|:---------------------------------------------------------------------------|
+|1| Person| |
+|2| Place| |
+|3| Organization| |
+|4| Activity| |
+|5| WorkGroup| |
+|6| Event| | 
+|7| Item|only within Event and  Activity|
+|**Product**| |
+|8| WebPage| |
+|9| DataSet| |
+|10| Document| |
+|11| LearningObject| |
+|12| Map| |
+|13| Media| | 
+|14| Model| |
+|15| (Datum)|partially implemented. a type of Dataset|
+|16| (TimeSeries)| partially implemented. a type of Dataset|
+|17| (Track)|partially implemented. a type of Dataset|
+
+**Support**
+|18| Conversation| | 
+|19| Message| |
+|21| Request| |
+|22| Entry| Conversations, Messages, and Requests consist of Entries|
+|20| (Other)| may not be needed, create a new Resource for a specific domain|
+
+**Info**
+|23| Address| |
+|24| Citation| |
+|25| ContactService| |
+|26| Metadata| |
+|-|-|-|
+
+
+*finis* 
